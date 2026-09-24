@@ -7,12 +7,12 @@
 void setup() {
   hardwareInit();
   protocolInit();
+
+  protocolTransmit("Hello, World!");
 }
 
 void loop() {
-  Serial.print("Checking if can transmit bit...\n");
-
   if (canTransmitBit()) {
-    Serial.println("Transmitting bit\n");
+    protocolTimerTick();
   }
 }
