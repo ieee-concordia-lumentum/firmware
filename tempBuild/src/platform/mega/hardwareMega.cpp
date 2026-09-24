@@ -1,36 +1,45 @@
 #include <Arduino.h>
 #include "hardware.h"
+#include "protocol.h"
 
-// have board specific pin layout and initialization here
-constexpr unsigned int transmissionPin = 22;
+constexpr uint8_t transmissionPin = 22;
+constexpr uint8_t ledPin = LED_BUILTIN;
 
-volatile bool timerFlag = false; // Flag to indicate when the timer interrupt has occurred
+constexpr uint16_t bitsPerSecond = 1;
 
-extern "C" {
+volatile bool timerFlag = false;
+
+extern "C"{
     void hardwareInit(void) {
-        Serial.begin(9600); // Initialize serial communication for debugging
+        Serial.begin(9600);
 
-        // --------------------------------- PIN INITIALIZATION --------------------------------- //
-        pinMode(transmissionPin, OUTPUT); // Set the transmission pin as an output
+        // ---------------- PIN INITIALIZATION ----------------
 
-        // --------------------------------- TIMER INITIALIZATION --------------------------------- //
-        cli();  // Clear global interrupts to ensure a clean setup
+        pinMode(transmissionPin, OUTPUT);
+        pinMode(ledPin, OUTPUT);
 
-        // Clear default values for Timer1 registers
-        // Timer0 is reserved by the Arduino core for millis(), micros(), delay(), etc.
-        // Timer1 is therefore used for the custom transmission timer.
+        // ---------------- TIMER INITIALIZATION ----------------
+
+        cli();
+
+        // Timer0 is used by Arduino for millis(), micros(), delay(), etc.
+        // Timer1 is used for custom transmission timing.
         TCCR1A = 0;
         TCCR1B = 0;
-        TCNT1 = 0;  // Clear the timer counter
+        TCNT1 = 0;
 
-        OCR1A = 7812; // TCNT1 counts upto this value and then triggers the interrupt, 15624 triggers the interrupt every 1 second.
-        TCCR1B |= (1 << WGM12); // Set to CTC mode (Clear Timer on Compare Match), this will reset the TCNT1 to 0 after it reaches the value in OCR1A
+        OCR1A = (F_CPU / (1024UL * bitsPerSecond)) - 1;
 
-        TCCR1B |= (1 << CS12) | (1 << CS10);    // Set prescaler to 1024, so the timer increments every 1024 clock cycles, it does 15624 increments before triggering the interrupt, which is 1 second at 16MHz clock speed
+        // CTC mode
+        TCCR1B |= (1 << WGM12);
 
-        TIMSK1 |= (1 << OCIE1A);    // Enable Timer1 compare interrupt
+        // Prescaler = 1024
+        TCCR1B |= (1 << CS12) | (1 << CS10);
 
-        sei();  // Enable global interrupts
+        // Enable Timer1 compare match interrupt
+        TIMSK1 |= (1 << OCIE1A);
+
+        sei();
     }
 
     bool canTransmitBit(void){
@@ -38,10 +47,29 @@ extern "C" {
             timerFlag = false;
             return true;
         }
-        return false; // Return the value of the timerFlag to indicate if the timer interrupt has occurred
+
+        return false;
+    }
+
+    bool transmitBit(char bitValue){
+        Serial.print("Transmitting bit: ");
+        Serial.println(bitValue);
+        if (bitValue == '1'){
+            digitalWrite(transmissionPin, HIGH);
+            digitalWrite(ledPin, HIGH);
+        }
+        else if (bitValue == '0'){
+            digitalWrite(transmissionPin, LOW);
+            digitalWrite(ledPin, LOW);
+        }
+        else{
+            return false;
+        }
+
+        return true;
     }
 }
 
-ISR(TIMER1_COMPA_vect) {
-    timerFlag = true; // Set the flag to indicate that the timer interrupt has occurred
+ISR(TIMER1_COMPA_vect){
+    timerFlag = true;
 }

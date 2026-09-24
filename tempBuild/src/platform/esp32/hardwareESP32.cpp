@@ -1,36 +1,64 @@
 #include <Arduino.h>
 #include "hardware.h"
+#include "protocol.h"
 
-// have board specific pin layout and initialization here
-constexpr unsigned int transmissionPin = 19;
+// ---------------- BOARD CONFIGURATION ----------------
+constexpr uint8_t transmissionPin = 19;
+constexpr uint8_t ledPin = 2;
 
-// if you see a red squigly line, ignore it, its a error in IDE but the code will compile and run properly.
-hw_timer_t *timer1 = NULL;          
-volatile bool timerFlag = false; // Flag to indicate when the timer interrupt has occurred
+constexpr uint32_t timerFrequency = 1000000;
+constexpr uint32_t bitsPerSecond = 1;
 
-void IRAM_ATTR onTimer() {
-    timerFlag = true; // Set the flag to indicate that the timer interrupt has occurred
-} // Forward declaration of the interrupt service routine
+hw_timer_t *transmissionTimer = nullptr;
+volatile bool timerFlag = false;
 
-extern "C" {
-    void hardwareInit(void) {
-        Serial.begin(9600); // Initialize serial communication for debugging
+// ---------------- TIMER ISR ----------------
+void IRAM_ATTR onTimer(){
+    timerFlag = true;
+}
 
-        // --------------------------------- PIN INITIALIZATION --------------------------------- //
-        pinMode(transmissionPin, OUTPUT); // Set the transmission pin as an output
+extern "C"{
+    void hardwareInit(void){
+        Serial.begin(9600);
 
-        // --------------------------------- TIMER INITIALIZATION --------------------------------- //
-        timer1 = timerBegin(1000000);
-        timerAttachInterrupt(timer1, &onTimer);
-        timerAlarm(timer1, 1000000, true, 0);  // 1 bit per second, lower it for faster transmission
+        // ---------------- PIN INITIALIZATION ----------------
+        pinMode(transmissionPin, OUTPUT);
+        pinMode(ledPin, OUTPUT);
+
+        // ---------------- TIMER INITIALIZATION ----------------
+        transmissionTimer = timerBegin(timerFrequency);
+
+        timerAttachInterrupt(transmissionTimer, &onTimer);
+
+        timerAlarm(transmissionTimer, timerFrequency / bitsPerSecond, true, 0);
     }
 
-    bool canTransmitBit(void) {
+
+    bool canTransmitBit(void){
         if (timerFlag){
             timerFlag = false;
             return true;
         }
+
         return false;
     }
 
+
+    bool transmitBit(char bitValue){
+        Serial.print("Transmitting bit: ");
+        Serial.println(bitValue);
+        if (bitValue == '1'){
+            digitalWrite(transmissionPin, HIGH);
+            digitalWrite(ledPin, HIGH);
+        }
+        else if (bitValue == '0'){
+            digitalWrite(transmissionPin, LOW);
+            digitalWrite(ledPin, LOW);
+        }
+        else{
+            return false;
+        }
+
+        return true;
+    }
 }
