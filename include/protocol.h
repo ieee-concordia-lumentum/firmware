@@ -1,5 +1,4 @@
-#ifndef PROTOCOL_H
-#define PROTOCOL_H
+#pragma once
 
 #ifdef __cplusplus
 extern "C" {
@@ -10,6 +9,4 @@ void protocolInit(void);
 
 #ifdef __cplusplus
 }
-#endif
-
 #endif

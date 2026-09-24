@@ -1,5 +1,4 @@
-#ifndef HARDWARE_H
-#define HARDWARE_H
+#pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -14,6 +13,3 @@ bool canTransmitBit(void);
 #ifdef __cplusplus
 }
 #endif
-
-#endif // HARDWARE_H
-

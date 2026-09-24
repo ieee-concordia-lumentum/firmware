@@ -2,7 +2,7 @@
 #include "hardware.h"
 
 // have board specific pin layout and initialization here
-#define trasmissionPin 22
+constexpr unsigned int transmissionPin = 22;
 
 volatile bool timerFlag = false; // Flag to indicate when the timer interrupt has occurred
 
@@ -11,12 +11,14 @@ extern "C" {
         Serial.begin(9600); // Initialize serial communication for debugging
 
         // --------------------------------- PIN INITIALIZATION --------------------------------- //
-        pinMode(trasmissionPin, OUTPUT); // Set the transmission pin as an output
+        pinMode(transmissionPin, OUTPUT); // Set the transmission pin as an output
 
         // --------------------------------- TIMER INITIALIZATION --------------------------------- //
         cli();  // Clear global interrupts to ensure a clean setup
 
         // Clear default values for Timer1 registers
+        // Timer0 is reserved by the Arduino core for millis(), micros(), delay(), etc.
+        // Timer1 is therefore used for the custom transmission timer.
         TCCR1A = 0;
         TCCR1B = 0;
         TCNT1 = 0;  // Clear the timer counter
