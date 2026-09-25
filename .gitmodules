@@ -1,3 +1,6 @@
 [submodule "hardware"]
 	path = hardware
 	url = https://github.com/ieee-concordia-lumentum/hardware.git
+[submodule "libopencm3"]
+	path = libopencm3
+	url = https://github.com/libopencm3/libopencm3.git
