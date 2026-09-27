@@ -2,39 +2,44 @@
 #include "hardware.h"
 #include "protocol.h"
 
+
 constexpr uint8_t transmissionPin = 22;
 constexpr uint8_t ledPin = LED_BUILTIN;
 
-constexpr uint16_t bitsPerSecond = 1;
+constexpr uint16_t bitsPerSecond = 1000;
 
-volatile bool timerFlag = false;
 
-extern "C"{
-    void hardwareInit(void) {
-        Serial.begin(9600);
+extern "C" {
 
-        // ---------------- PIN INITIALIZATION ----------------
+    void hardwareInit(void){
+        Serial.begin(115200);
 
         pinMode(transmissionPin, OUTPUT);
         pinMode(ledPin, OUTPUT);
 
-        // ---------------- TIMER INITIALIZATION ----------------
+        // Idle state
+        digitalWrite(transmissionPin, LOW);
+        digitalWrite(ledPin, LOW);
 
         cli();
 
-        // Timer0 is used by Arduino for millis(), micros(), delay(), etc.
-        // Timer1 is used for custom transmission timing.
         TCCR1A = 0;
         TCCR1B = 0;
         TCNT1 = 0;
 
-        OCR1A = (F_CPU / (1024UL * bitsPerSecond)) - 1;
+        /*
+         * 16 MHz clock
+         * Prescaler = 1
+         *
+         * 16,000,000 / 9600 = approximately 1666.67 timer counts
+         */
+        OCR1A = 15999;
 
         // CTC mode
         TCCR1B |= (1 << WGM12);
 
-        // Prescaler = 1024
-        TCCR1B |= (1 << CS12) | (1 << CS10);
+        // Prescaler = 1
+        TCCR1B |= (1 << CS10);
 
         // Enable Timer1 compare match interrupt
         TIMSK1 |= (1 << OCIE1A);
@@ -42,18 +47,8 @@ extern "C"{
         sei();
     }
 
-    bool canTransmitBit(void){
-        if (timerFlag){
-            timerFlag = false;
-            return true;
-        }
-
-        return false;
-    }
 
     bool transmitBit(char bitValue){
-        Serial.print("Transmitting bit: ");
-        Serial.println(bitValue);
         if (bitValue == '1'){
             digitalWrite(transmissionPin, HIGH);
             digitalWrite(ledPin, HIGH);
@@ -70,6 +65,7 @@ extern "C"{
     }
 }
 
+
 ISR(TIMER1_COMPA_vect){
-    timerFlag = true;
+    protocolTransmitTick();
 }
