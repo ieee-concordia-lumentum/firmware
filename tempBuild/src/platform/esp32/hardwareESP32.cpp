@@ -1,64 +1,92 @@
 #include <Arduino.h>
+#include <driver/gpio.h>
+
 #include "hardware.h"
 #include "protocol.h"
 
-// ---------------- BOARD CONFIGURATION ----------------
-constexpr uint8_t transmissionPin = 19;
+
+// Connect sender GPIO 26 directly to receiver GPIO 21.
+constexpr uint8_t transmissionPin = 18;
+constexpr uint8_t receivePin = 19;
 constexpr uint8_t ledPin = 2;
 
-constexpr uint32_t timerFrequency = 1000000;
-constexpr uint32_t bitsPerSecond = 1;
+constexpr uint32_t timerFrequency = 38400;
+constexpr uint64_t senderAlarmTicks = 4;
+constexpr uint64_t receiverAlarmTicks = 1;
 
 hw_timer_t *transmissionTimer = nullptr;
-volatile bool timerFlag = false;
 
-// ---------------- TIMER ISR ----------------
-void IRAM_ATTR onTimer(){
-    timerFlag = true;
+
+void ARDUINO_ISR_ATTR onTimer(){
+#ifdef SENDER
+    protocolTransmitTick();
+
+#elif defined(RECEIVER)
+    bool sample = gpio_get_level((gpio_num_t)receivePin);
+    protocolReceiveTick(sample);
+#endif
 }
+
 
 extern "C"{
     void hardwareInit(void){
-        Serial.begin(9600);
+        Serial.begin(115200);
+        delay(500);
 
-        // ---------------- PIN INITIALIZATION ----------------
+#ifdef SENDER
         pinMode(transmissionPin, OUTPUT);
         pinMode(ledPin, OUTPUT);
 
-        // ---------------- TIMER INITIALIZATION ----------------
+        gpio_set_level((gpio_num_t)transmissionPin, 0);
+        gpio_set_level((gpio_num_t)ledPin, 0);
+
+#elif defined(RECEIVER)
+        pinMode(receivePin, INPUT_PULLDOWN);
+        pinMode(ledPin, OUTPUT);
+
+        gpio_set_level((gpio_num_t)ledPin, 0);
+#endif
+
         transmissionTimer = timerBegin(timerFrequency);
+
+        if (transmissionTimer == nullptr){
+            Serial.println("ERROR: hardware timer creation failed");
+            return;
+        }
 
         timerAttachInterrupt(transmissionTimer, &onTimer);
 
-        timerAlarm(transmissionTimer, timerFrequency / bitsPerSecond, true, 0);
-    }
+#ifdef SENDER
+        timerAlarm(transmissionTimer, senderAlarmTicks, true, 0);
+        Serial.print("Sender timer base frequency: ");
 
+#elif defined(RECEIVER)
+        timerAlarm(transmissionTimer, receiverAlarmTicks, true, 0);
+        Serial.print("Receiver timer base frequency: ");
+#endif
 
-    bool canTransmitBit(void){
-        if (timerFlag){
-            timerFlag = false;
-            return true;
-        }
-
-        return false;
+        Serial.println(timerGetFrequency(transmissionTimer));
     }
 
 
     bool transmitBit(char bitValue){
-        Serial.print("Transmitting bit: ");
-        Serial.println(bitValue);
+#ifdef SENDER
         if (bitValue == '1'){
-            digitalWrite(transmissionPin, HIGH);
-            digitalWrite(ledPin, HIGH);
+            gpio_set_level((gpio_num_t)transmissionPin, 1);
+            gpio_set_level((gpio_num_t)ledPin, 1);
         }
         else if (bitValue == '0'){
-            digitalWrite(transmissionPin, LOW);
-            digitalWrite(ledPin, LOW);
+            gpio_set_level((gpio_num_t)transmissionPin, 0);
+            gpio_set_level((gpio_num_t)ledPin, 0);
         }
         else{
             return false;
         }
 
         return true;
+#else
+        (void)bitValue;
+        return false;
+#endif
     }
 }
