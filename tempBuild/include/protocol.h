@@ -24,7 +24,6 @@ void PROTOCOL_ISR_ATTR protocolReceiveTick(bool sample);
 bool protocolIsReady(void);
 bool protocolIsTransmitting(void);
 uint8_t protocolGetReceiverProgress(void);
-uint8_t protocolGetHeaderType(void);
 uint16_t protocolGetMessageLength(void);
 void protocolResetReceiver(void);
 
