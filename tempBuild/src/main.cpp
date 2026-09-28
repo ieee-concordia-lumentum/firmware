@@ -30,7 +30,7 @@ void loop(){
         !protocolIsTransmitting()){
         previousTransmission = millis();
         protocolTransmit("Hello, World!");
-        Serial.println("Sending header: 01 00 0D");
+        Serial.println("Sending header: A0 00 D5");
     }
 
 
@@ -49,8 +49,6 @@ void loop(){
     if (protocolIsReady() && !headerReported){
         digitalWrite(statusLedPin, HIGH);
         Serial.println("HEADER SUCCESS");
-        Serial.print("Header type: 0x");
-        Serial.println(protocolGetHeaderType(), HEX);
         Serial.print("Message length: ");
         Serial.print(protocolGetMessageLength());
         Serial.println(" bytes");

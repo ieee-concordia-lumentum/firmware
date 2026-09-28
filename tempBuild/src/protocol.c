@@ -19,10 +19,11 @@
 #define SYNCWORD          UINT8_C(0xD3)
 #define SYNCWORD_LENGTH   UINT8_C(8)
 
-// First 24-bit header packet:
-// [packet type: 8 bits][message length in bytes: 16 bits]
-#define HEADER_TYPE       UINT8_C(0x01)
-#define HEADER_LENGTH     UINT8_C(24)
+// Every 24-bit packet is:
+// [start pattern: 4 bits][contents: 16 bits][end pattern: 4 bits]
+#define START_PATTERN     UINT8_C(0x0A)
+#define END_PATTERN       UINT8_C(0x05)
+#define PACKET_LENGTH     UINT8_C(24)
 
 #define SAMPLES_PER_BIT   UINT8_C(4)
 #define VOTE_SAMPLES      UINT8_C(3)
@@ -66,7 +67,6 @@
 
     static volatile uint32_t receivedHeader = 0;
     static volatile uint8_t headerCount = 0;
-    static volatile uint8_t receivedHeaderType = 0;
     static volatile uint16_t receivedMessageLength = 0;
 
     static volatile uint8_t receiverProgress = 0;
@@ -85,7 +85,6 @@
 
         receivedHeader = 0;
         headerCount = 0;
-        receivedHeaderType = 0;
         receivedMessageLength = 0;
     }
 
@@ -144,13 +143,16 @@
                     receiverProgress = 25 + headerCount;
                 }
 
-                if (headerCount >= HEADER_LENGTH){
-                    receivedHeaderType =
-                        (uint8_t)(receivedHeader >> 16);
-                    receivedMessageLength =
-                        (uint16_t)(receivedHeader & UINT16_C(0xFFFF));
+                if (headerCount >= PACKET_LENGTH){
+                    uint8_t startPattern =
+                        (uint8_t)((receivedHeader >> 20) & UINT8_C(0x0F));
+                    uint8_t endPattern =
+                        (uint8_t)(receivedHeader & UINT8_C(0x0F));
 
-                    if (receivedHeaderType == HEADER_TYPE){
+                    if ((startPattern == START_PATTERN) &&
+                        (endPattern == END_PATTERN)){
+                        receivedMessageLength = (uint16_t)
+                            ((receivedHeader >> 4) & UINT16_C(0xFFFF));
                         rxState = RX_READY;
                     }
                     else{
@@ -197,8 +199,9 @@ void protocolTransmit(const char *message){
     }
 
     headerPacket =
-        ((uint32_t)HEADER_TYPE << 16) |
-        (uint16_t)messageLength;
+        ((uint32_t)START_PATTERN << 20) |
+        ((uint32_t)(uint16_t)messageLength << 4) |
+        (uint32_t)END_PATTERN;
 
     txBitIndex = 0;
     txState = TX_PREAMBLE;
@@ -252,12 +255,12 @@ void PROTOCOL_ISR_ATTR protocolTransmitTick(void){
 
         case TX_HEADER:
             bitValue = (uint8_t)((headerPacket >>
-                (HEADER_LENGTH - 1 - txBitIndex)) & 1);
+                (PACKET_LENGTH - 1 - txBitIndex)) & 1);
 
             transmitBit(bitValue ? '1' : '0');
             txBitIndex++;
 
-            if (txBitIndex >= HEADER_LENGTH){
+            if (txBitIndex >= PACKET_LENGTH){
                 txBitIndex = 0;
                 txState = TX_FINISH;
             }
@@ -265,7 +268,7 @@ void PROTOCOL_ISR_ATTR protocolTransmitTick(void){
 
 
         case TX_FINISH:
-            // End the last sync bit and return the line to idle LOW.
+            // End the last header bit and return the line to idle LOW.
             transmitBit('0');
             txState = TX_IDLE;
             inTransmission = false;
@@ -350,15 +353,6 @@ bool protocolIsTransmitting(void){
 uint8_t protocolGetReceiverProgress(void){
 #ifdef RECEIVER
     return receiverProgress;
-#else
-    return 0;
-#endif
-}
-
-
-uint8_t protocolGetHeaderType(void){
-#ifdef RECEIVER
-    return receivedHeaderType;
 #else
     return 0;
 #endif
