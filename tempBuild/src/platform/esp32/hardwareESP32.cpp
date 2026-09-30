@@ -11,6 +11,7 @@ constexpr uint8_t receivePin = 19;
 constexpr uint8_t ledPin = 2;
 
 constexpr uint32_t timerFrequency = 38400;
+constexpr uint16_t timerDivider = 80000000UL / timerFrequency;
 constexpr uint64_t senderAlarmTicks = 4;
 constexpr uint64_t receiverAlarmTicks = 1;
 
@@ -47,25 +48,26 @@ extern "C"{
         gpio_set_level((gpio_num_t)ledPin, 0);
 #endif
 
-        transmissionTimer = timerBegin(timerFrequency);
+        transmissionTimer = timerBegin(0, timerDivider, true);
 
         if (transmissionTimer == nullptr){
             Serial.println("ERROR: hardware timer creation failed");
             return;
         }
 
-        timerAttachInterrupt(transmissionTimer, &onTimer);
+        timerAttachInterrupt(transmissionTimer, &onTimer, true);
 
 #ifdef SENDER
-        timerAlarm(transmissionTimer, senderAlarmTicks, true, 0);
+        timerAlarmWrite(transmissionTimer, senderAlarmTicks, true);
         Serial.print("Sender timer base frequency: ");
 
 #elif defined(RECEIVER)
-        timerAlarm(transmissionTimer, receiverAlarmTicks, true, 0);
+        timerAlarmWrite(transmissionTimer, receiverAlarmTicks, true);
         Serial.print("Receiver timer base frequency: ");
 #endif
 
-        Serial.println(timerGetFrequency(transmissionTimer));
+        Serial.println(80000000UL / timerDivider);
+        timerAlarmEnable(transmissionTimer);
     }
 
 

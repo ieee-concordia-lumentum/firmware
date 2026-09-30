@@ -23,6 +23,8 @@ void setup(){
 
 
 void loop(){
+    protocolProcess();
+
 #ifdef SENDER
     static unsigned long previousTransmission = 0;
 
@@ -30,7 +32,7 @@ void loop(){
         !protocolIsTransmitting()){
         previousTransmission = millis();
         protocolTransmit("Hello, World!");
-        Serial.println("Sending header: A0 00 D5");
+        Serial.println("Sending RS-protected header: A0 00 D5 + 4 ECC bytes");
     }
 
 
@@ -52,6 +54,8 @@ void loop(){
         Serial.print("Message length: ");
         Serial.print(protocolGetMessageLength());
         Serial.println(" bytes");
+        Serial.print("ECC corrected symbols: ");
+        Serial.println(protocolGetCorrectedSymbolCount());
         headerReported = true;
     }
 #endif
