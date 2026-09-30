@@ -17,6 +17,7 @@ extern "C" {
 
 void protocolInit(void);
 void protocolTransmit(const char *message);
+void protocolProcess(void);
 
 void PROTOCOL_ISR_ATTR protocolTransmitTick(void);
 void PROTOCOL_ISR_ATTR protocolReceiveTick(bool sample);
@@ -25,6 +26,7 @@ bool protocolIsReady(void);
 bool protocolIsTransmitting(void);
 uint8_t protocolGetReceiverProgress(void);
 uint16_t protocolGetMessageLength(void);
+int8_t protocolGetCorrectedSymbolCount(void);
 void protocolResetReceiver(void);
 
 #ifdef __cplusplus
