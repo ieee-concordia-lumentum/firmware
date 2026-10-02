@@ -1,0 +1,58 @@
+#include <Arduino.h>
+#include "hardware.h"
+#include "protocol.h"
+
+void setup(){
+    protocolInit();
+    hardwareInit();
+}
+
+
+void loop(){
+    protocolProcess();
+
+#ifdef SENDER
+    static const char message[] =
+        "Hello world, this is a test to check if the "
+        "transmission and receiving is working properly";
+    constexpr unsigned long transmissionIntervalMs = 10000;
+    static unsigned long lastTransmission = 0;
+    if (millis() - lastTransmission >= transmissionIntervalMs &&
+        !protocolIsTransmitting()){
+        if (protocolTransmit(reinterpret_cast<const uint8_t *>(message),
+                             sizeof(message) - 1)){
+            lastTransmission = millis();
+            Serial.println("Sending message");
+        }
+    }
+#elif defined(RECEIVER)
+    static unsigned long receptionStarted = 0;
+    static bool receiving = false;
+    uint8_t progress = protocolGetReceiverProgress();
+    if (progress == 0){
+        receiving = false;
+    }
+    if (progress > 0 && !receiving){
+        receiving = true;
+        receptionStarted = millis();
+    }
+    if (protocolIsReady()){
+        Serial.print("Received: ");
+        Serial.write(protocolGetMessageData(), protocolGetMessageLength());
+        Serial.println();
+        Serial.print("Corrected RS symbols: ");
+        Serial.println(protocolGetCorrectedSymbolCount());
+        protocolResetReceiver();
+        receiving = false;
+    }
+    else if (receiving && millis() - receptionStarted > 1000){
+        Serial.println("Incomplete reception; resetting");
+        protocolResetReceiver();
+        receiving = false;
+    }
+    // Avoid serial output while a packet stream is being sampled.
+#endif
+}
+
+
+
