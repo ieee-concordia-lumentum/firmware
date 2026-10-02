@@ -1,44 +1,23 @@
 #include "protocol.h"
 #include "hardware.h"
-
-#include <stdbool.h>
-#include <stdint.h>
 #include <string.h>
 
 #if defined(SENDER) && defined(RECEIVER)
-    #error "Define only SENDER or RECEIVER, not both"
+#error "Define only one device role"
 #elif !defined(SENDER) && !defined(RECEIVER)
-    #error "Define SENDER or RECEIVER"
+#error "Define SENDER or RECEIVER"
 #endif
 
-
-// Everything is sent MSB first:
-// 1010101010101010, 11010011, then one Reed-Solomon protected header.
-#define PREAMBLE          UINT16_C(0xAAAA)
-#define PREAMBLE_LENGTH   UINT8_C(16)
-#define SYNCWORD          UINT8_C(0xD3)
-#define SYNCWORD_LENGTH   UINT8_C(8)
-
-// The uncoded header is three bytes:
-// [start pattern: 4 bits][message length: 16 bits][end pattern: 4 bits]
-// Four RS parity bytes are appended, producing a seven-byte RS(7, 3)
-// codeword. This corrects up to two corrupted bytes in the header.
-#define START_PATTERN     UINT8_C(0x0A)
-#define END_PATTERN       UINT8_C(0x05)
-#define HEADER_DATA_BYTES UINT8_C(3)
-#define RS_ECC_SYMBOLS    UINT8_C(4)
-#define HEADER_BYTES      (HEADER_DATA_BYTES + RS_ECC_SYMBOLS)
-#define HEADER_BIT_LENGTH (HEADER_BYTES * UINT8_C(8))
-
-#define GF_PRIMITIVE_POLYNOMIAL UINT16_C(0x011D)
-
-#define SAMPLES_PER_BIT   UINT8_C(4)
-#define VOTE_SAMPLES      UINT8_C(3)
-
-
-// GF(256) uses primitive polynomial 0x11D. The generator polynomial has
-// roots alpha^0 through alpha^3 so the encoder and decoder use four
-// consecutive syndromes.
+#define PREAMBLE 0xAAAAU
+#define SYNCWORD 0xD3U
+#define START_PATTERN 0xAU
+#define END_PATTERN 0x5U
+#define HEADER_BYTES 7U
+#define RS_ECC_SYMBOLS 4U
+#define DATA_CODEWORD_BYTES 10U
+#define GF_PRIMITIVE_POLYNOMIAL 0x011DU
+#define MAX_PACKETS ((PROTOCOL_MAX_MESSAGE_BYTES + 5U) / 6U)
+#define MAX_WIRE_BYTES (MAX_PACKETS * PROTOCOL_PACKET_BYTES)
 static uint8_t gfExp[512];
 static uint8_t gfLog[256];
 static uint8_t rsGenerator[RS_ECC_SYMBOLS + 1];
@@ -110,13 +89,13 @@ static uint8_t polynomialEvaluate(const uint8_t *polynomial,
 }
 
 
-static void rsEncodeHeader(const uint8_t *header, uint8_t *codeword){
-    uint8_t remainder[HEADER_BYTES];
+static void rsEncode(const uint8_t *header, uint8_t dataLength, uint8_t *codeword){
+    uint8_t remainder[DATA_CODEWORD_BYTES];
 
-    memcpy(remainder, header, HEADER_DATA_BYTES);
-    memset(&remainder[HEADER_DATA_BYTES], 0, RS_ECC_SYMBOLS);
+    memcpy(remainder, header, dataLength);
+    memset(&remainder[dataLength], 0, RS_ECC_SYMBOLS);
 
-    for (uint8_t index = 0; index < HEADER_DATA_BYTES; index++){
+    for (uint8_t index = 0; index < dataLength; index++){
         uint8_t coefficient = remainder[index];
 
         if (coefficient != 0){
@@ -129,16 +108,16 @@ static void rsEncodeHeader(const uint8_t *header, uint8_t *codeword){
         }
     }
 
-    memcpy(codeword, header, HEADER_DATA_BYTES);
-    memcpy(&codeword[HEADER_DATA_BYTES],
-           &remainder[HEADER_DATA_BYTES],
+    memcpy(codeword, header, dataLength);
+    memcpy(&codeword[dataLength],
+           &remainder[dataLength],
            RS_ECC_SYMBOLS);
 }
 
 
 // Returns 0 for no error, 1 or 2 for the number of corrected byte symbols,
 // and -1 when the codeword cannot be corrected.
-static int8_t rsDecodeHeader(uint8_t *codeword){
+static int8_t rsDecode(uint8_t *codeword, uint8_t codewordLength){
     uint8_t syndrome[RS_ECC_SYMBOLS];
     uint8_t syndrome0;
     uint8_t syndrome1;
@@ -147,7 +126,7 @@ static int8_t rsDecodeHeader(uint8_t *codeword){
 
     for (uint8_t index = 0; index < RS_ECC_SYMBOLS; index++){
         syndrome[index] = polynomialEvaluate(
-            codeword, HEADER_BYTES, gfExp[index]);
+            codeword, codewordLength, gfExp[index]);
     }
 
     if ((syndrome[0] == 0) && (syndrome[1] == 0) &&
@@ -171,9 +150,9 @@ static int8_t rsDecodeHeader(uint8_t *codeword){
                 (gfMultiply(syndrome0, locationCubed) == syndrome3)){
                 uint8_t degree = gfLog[location];
 
-                if (degree < HEADER_BYTES){
+                if (degree < codewordLength){
                     uint8_t position =
-                        (uint8_t)(HEADER_BYTES - 1 - degree);
+                        (uint8_t)(codewordLength - 1 - degree);
 
                     codeword[position] ^= syndrome0;
 
@@ -181,7 +160,7 @@ static int8_t rsDecodeHeader(uint8_t *codeword){
                          index < RS_ECC_SYMBOLS;
                          index++){
                         if (polynomialEvaluate(codeword,
-                                               HEADER_BYTES,
+                                               codewordLength,
                                                gfExp[index]) != 0){
                             codeword[position] ^= syndrome0;
                             break;
@@ -221,7 +200,7 @@ static int8_t rsDecodeHeader(uint8_t *codeword){
                 gfMultiply(syndrome2, syndrome2),
             gfInverse(determinant));
 
-        for (uint8_t degree = 0; degree < HEADER_BYTES; degree++){
+        for (uint8_t degree = 0; degree < codewordLength; degree++){
             uint8_t location = gfExp[degree];
             uint8_t inverseLocation = gfInverse(location);
             uint8_t locatorValue =
@@ -231,11 +210,11 @@ static int8_t rsDecodeHeader(uint8_t *codeword){
 
             if (locatorValue == 0){
                 if (found == 0){
-                    position1 = (uint8_t)(HEADER_BYTES - 1 - degree);
+                    position1 = (uint8_t)(codewordLength - 1 - degree);
                     location1 = location;
                 }
                 else if (found == 1){
-                    position2 = (uint8_t)(HEADER_BYTES - 1 - degree);
+                    position2 = (uint8_t)(codewordLength - 1 - degree);
                     location2 = location;
                 }
 
@@ -261,7 +240,7 @@ static int8_t rsDecodeHeader(uint8_t *codeword){
 
             for (uint8_t index = 0; index < RS_ECC_SYMBOLS; index++){
                 if (polynomialEvaluate(codeword,
-                                       HEADER_BYTES,
+                                       codewordLength,
                                        gfExp[index]) != 0){
                     codeword[position1] ^= error1;
                     codeword[position2] ^= error2;
@@ -276,359 +255,310 @@ static int8_t rsDecodeHeader(uint8_t *codeword){
 
 
 #ifdef SENDER
-    typedef enum{
-        TX_IDLE,
-        TX_PREAMBLE,
-        TX_SYNC,
-        TX_HEADER,
-        TX_FINISH
-    } TxState;
+typedef enum{
+    TX_IDLE,
+    TX_PREAMBLE,
+    TX_SYNC,
+    TX_HEADER,
+    TX_DATA,
+    TX_FINISH
+} TxState;
+static volatile TxState txState;
+static volatile bool inTransmission;
+static uint8_t encodedHeader[HEADER_BYTES];
+static uint8_t txWire[MAX_WIRE_BYTES];
+static uint16_t txWireLength;
+static volatile uint16_t txBitIndex;
+#else
+typedef enum{
+    RX_WAITING,
+    RX_PREAMBLE,
+    RX_SYNC,
+    RX_HEADER,
+    RX_DATA,
+    RX_READY
+} RxState;
+static volatile RxState rxState;
+static volatile bool resetRequested;
+static volatile uint8_t previousSample;
+static volatile uint8_t samplePhase;
+static volatile uint8_t highSampleCount;
+static volatile uint8_t preambleCount;
+static volatile uint8_t syncCount;
+static volatile uint8_t syncValue;
+static volatile uint8_t receivedHeader[HEADER_BYTES];
+static volatile uint8_t headerBitCount;
+static volatile uint8_t rxWire[MAX_WIRE_BYTES];
+static volatile uint16_t rxWireBytes;
+static uint8_t incomingByte;
+static uint8_t incomingBits;
+static uint16_t receivedLength;
+static uint16_t decodedPackets;
+static uint16_t messageBytes;
+static uint8_t rxMessage[PROTOCOL_MAX_MESSAGE_BYTES];
+static bool headerDecoded;
+static int16_t correctedSymbols;
+static volatile uint8_t receiverProgress;
 
-    static volatile TxState txState = TX_IDLE;
-    static volatile uint8_t txBitIndex = 0;
-    static volatile uint8_t encodedHeader[HEADER_BYTES];
-    static volatile bool inTransmission = false;
+static void PROTOCOL_ISR_ATTR resetReceiver(void){
+    rxState = RX_WAITING;
+    samplePhase = highSampleCount = 0;
+    preambleCount = syncCount = syncValue = 0;
+    headerBitCount = 0;
+    rxWireBytes = 0;
+    incomingByte = incomingBits = 0;
+    headerDecoded = false;
+    receivedLength = decodedPackets = messageBytes = 0;
+    correctedSymbols = 0;
+    receiverProgress = 0;
+}
 
-
-#elif defined(RECEIVER)
-    typedef enum{
-        RX_WAITING,
-        RX_PREAMBLE,
-        RX_SYNC,
-        RX_HEADER,
-        RX_ECC_PENDING,
-        RX_READY
-    } RxState;
-
-    static volatile RxState rxState = RX_WAITING;
-
-    static volatile uint8_t previousSample = 0;
-    static volatile uint8_t samplePhase = 0;
-    static volatile uint8_t highSampleCount = 0;
-
-    static volatile uint8_t preambleCount = 0;
-    static volatile uint8_t expectedPreambleBit = 1;
-
-    static volatile uint8_t receivedSyncword = 0;
-    static volatile uint8_t syncwordCount = 0;
-
-    static volatile uint8_t receivedHeader[HEADER_BYTES];
-    static volatile uint8_t headerBitCount = 0;
-    static volatile uint16_t receivedMessageLength = 0;
-    static volatile int8_t correctedSymbolCount = -1;
-
-    static volatile uint8_t receiverProgress = 0;
-
-
-    static void PROTOCOL_ISR_ATTR clearReceivedHeader(void){
-        for (uint8_t index = 0; index < HEADER_BYTES; index++){
-            receivedHeader[index] = 0;
-        }
-    }
-
-
-    static void PROTOCOL_ISR_ATTR resetReceiver(void){
-        rxState = RX_WAITING;
-        samplePhase = 0;
-        highSampleCount = 0;
-
-        preambleCount = 0;
-        expectedPreambleBit = 1;
-
-        receivedSyncword = 0;
-        syncwordCount = 0;
-
-        clearReceivedHeader();
-        headerBitCount = 0;
-        receivedMessageLength = 0;
-        correctedSymbolCount = -1;
-    }
-
-
-    static void PROTOCOL_ISR_ATTR processReceivedBit(uint8_t bitValue){
-        switch (rxState){
-            case RX_PREAMBLE:
-                if (bitValue != expectedPreambleBit){
+static void PROTOCOL_ISR_ATTR processReceivedBit(uint8_t bit){
+    switch (rxState){
+        case RX_PREAMBLE:
+            if (bit != ((preambleCount & 1U) ? 0U : 1U)){
+                resetReceiver();
+                return;
+            }
+            if (++preambleCount == 16U){
+                rxState = RX_SYNC;
+                receiverProgress = 2;
+            }
+            break;
+        case RX_SYNC:
+            syncValue = (uint8_t)((syncValue << 1) | bit);
+            if (++syncCount == 8U){
+                if (syncValue != SYNCWORD){
                     resetReceiver();
                     return;
                 }
-
-                preambleCount++;
-                expectedPreambleBit = !expectedPreambleBit;
-
-                if ((1 + preambleCount) > receiverProgress){
-                    receiverProgress = 1 + preambleCount;
-                }
-
-                if (preambleCount >= PREAMBLE_LENGTH){
-                    receivedSyncword = 0;
-                    syncwordCount = 0;
-                    rxState = RX_SYNC;
-                }
-                break;
-
-
-            case RX_SYNC:
-                receivedSyncword =
-                    (uint8_t)((receivedSyncword << 1) | bitValue);
-                syncwordCount++;
-
-                if ((17 + syncwordCount) > receiverProgress){
-                    receiverProgress = 17 + syncwordCount;
-                }
-
-                if (syncwordCount >= SYNCWORD_LENGTH){
-                    if (receivedSyncword == SYNCWORD){
-                        clearReceivedHeader();
-                        headerBitCount = 0;
-                        rxState = RX_HEADER;
-                    }
-                    else{
-                        resetReceiver();
-                    }
-                }
-                break;
-
-
-            case RX_HEADER:
-                {
-                    uint8_t byteIndex = headerBitCount / 8;
-
-                    receivedHeader[byteIndex] = (uint8_t)
-                        ((receivedHeader[byteIndex] << 1) | bitValue);
-                    headerBitCount++;
-                }
-
-                if ((25 + headerBitCount) > receiverProgress){
-                    receiverProgress = 25 + headerBitCount;
-                }
-
-                if (headerBitCount >= HEADER_BIT_LENGTH){
-                    rxState = RX_ECC_PENDING;
-                }
-                break;
-
-
-            default:
-                break;
-        }
+                rxState = RX_HEADER;
+                receiverProgress = 3;
+            }
+            break;
+        case RX_HEADER: {
+            uint8_t index = headerBitCount / 8U;
+            if ((headerBitCount % 8U) == 0U){
+                receivedHeader[index] = 0;
+            }
+            receivedHeader[index] = (uint8_t)((receivedHeader[index] << 1) | bit);
+            if (++headerBitCount == 56U){
+                // Keep collecting immediately; header ECC runs in the main loop.
+                rxState = RX_DATA;
+                receiverProgress = 4;
+            }
+            break;
     }
+    case RX_DATA:
+        if (rxWireBytes >= MAX_WIRE_BYTES){
+            break;
+        }
+        incomingByte = (uint8_t)((incomingByte << 1) | bit);
+        if (++incomingBits == 8U){
+            rxWire[rxWireBytes] = incomingByte;
+            rxWireBytes++; // Publish only complete bytes.
+            incomingByte = incomingBits = 0;
+        }
+        break;
+    default:
+        break;
+    }
+}
 #endif
-
 
 void protocolInit(void){
     rsInit();
-
 #ifdef SENDER
     txState = TX_IDLE;
-    txBitIndex = 0;
-    memset((void *)encodedHeader, 0, sizeof(encodedHeader));
     inTransmission = false;
-
-#elif defined(RECEIVER)
+    txBitIndex = 0;
+#else
     previousSample = 0;
-    receiverProgress = 0;
     resetReceiver();
 #endif
 }
 
-
-void protocolTransmit(const char *message){
+bool protocolTransmit(const uint8_t *data, uint16_t length){
 #ifdef SENDER
-    size_t messageLength;
-    uint8_t header[HEADER_DATA_BYTES];
-    uint32_t headerPacket;
+    if (inTransmission || data == NULL || length == 0 ||
+        length > PROTOCOL_MAX_MESSAGE_BYTES) return false;
 
-    if (inTransmission || (message == NULL)){
-        return;
+    uint32_t header = ((uint32_t)START_PATTERN << 20) |
+                      ((uint32_t)length << 4) | END_PATTERN;
+    uint8_t rawHeader[3] = {
+        (uint8_t)(header >> 16), (uint8_t)(header >> 8), (uint8_t)header
+    };
+    rsEncode(rawHeader, 3, encodedHeader);
+    txWireLength = 0;
+    for (uint16_t offset = 0; offset < length; offset += 6U){
+        uint8_t payload[6] = {0};
+        uint16_t remaining = length - offset;
+        uint8_t count = remaining > 6U ? 6U : (uint8_t)remaining;
+        memcpy(payload, data + offset, count);
+        uint8_t *packet = txWire + txWireLength;
+        packet[0] = 0xAA;
+        packet[1] = 0xD3;
+        rsEncode(payload, 6, packet + 2);
+        packet[12] = 0x55;
+        packet[13] = 0x2C;
+        txWireLength += PROTOCOL_PACKET_BYTES;
     }
-
-    messageLength = strlen(message);
-
-    if (messageLength > UINT16_MAX){
-        messageLength = UINT16_MAX;
-    }
-
-    headerPacket =
-        ((uint32_t)START_PATTERN << 20) |
-        ((uint32_t)(uint16_t)messageLength << 4) |
-        (uint32_t)END_PATTERN;
-
-    header[0] = (uint8_t)(headerPacket >> 16);
-    header[1] = (uint8_t)(headerPacket >> 8);
-    header[2] = (uint8_t)headerPacket;
-    rsEncodeHeader(header, (uint8_t *)encodedHeader);
-
     txBitIndex = 0;
     txState = TX_PREAMBLE;
     inTransmission = true;
+    return true;
 #else
-    (void)message;
+    (void)data;
+    (void)length;
+    return false;
 #endif
 }
-
 
 void PROTOCOL_ISR_ATTR protocolTransmitTick(void){
 #ifdef SENDER
-    uint8_t bitValue;
-
     if (!inTransmission){
         return;
     }
-
+    uint8_t bit = 0;
     switch (txState){
-        case TX_IDLE:
-            return;
-
-
         case TX_PREAMBLE:
-            bitValue = (uint8_t)((PREAMBLE >>
-                (PREAMBLE_LENGTH - 1 - txBitIndex)) & 1);
-
-            transmitBit(bitValue ? '1' : '0');
-            txBitIndex++;
-
-            if (txBitIndex >= PREAMBLE_LENGTH){
-                txBitIndex = 0;
-                txState = TX_SYNC;
-            }
+            bit = (PREAMBLE >> (15U - txBitIndex)) & 1U;
             break;
-
-
         case TX_SYNC:
-            bitValue = (uint8_t)((SYNCWORD >>
-                (SYNCWORD_LENGTH - 1 - txBitIndex)) & 1);
-
-            transmitBit(bitValue ? '1' : '0');
-            txBitIndex++;
-
-            if (txBitIndex >= SYNCWORD_LENGTH){
-                txBitIndex = 0;
-                txState = TX_HEADER;
-            }
+            bit = (SYNCWORD >> (7U - txBitIndex)) & 1U;
             break;
-
-
         case TX_HEADER:
-            bitValue = (uint8_t)((encodedHeader[txBitIndex / 8] >>
-                (7 - (txBitIndex % 8))) & 1);
-
-            transmitBit(bitValue ? '1' : '0');
-            txBitIndex++;
-
-            if (txBitIndex >= HEADER_BIT_LENGTH){
-                txBitIndex = 0;
-                txState = TX_FINISH;
-            }
+            bit = (encodedHeader[txBitIndex / 8U] >>
+                   (7U - txBitIndex % 8U)) & 1U;
             break;
-
-
+        case TX_DATA:
+            bit = (txWire[txBitIndex / 8U] >>
+                   (7U - txBitIndex % 8U)) & 1U;
+            break;
         case TX_FINISH:
-            // End the last header bit and return the line to idle LOW.
             transmitBit('0');
             txState = TX_IDLE;
             inTransmission = false;
-            break;
+            return;
+        default:
+            return;
+    }
+    transmitBit(bit ? '1' : '0');
+    txBitIndex++;
+    if (txState == TX_PREAMBLE && txBitIndex == 16U){
+        txBitIndex = 0;
+    txState = TX_SYNC;
+    }
+    else if (txState == TX_SYNC && txBitIndex == 8U){
+        txBitIndex = 0;
+    txState = TX_HEADER;
+    }
+    else if (txState == TX_HEADER && txBitIndex == 56U){
+        txBitIndex = 0;
+    txState = TX_DATA;
+    }
+    else if (txState == TX_DATA && txBitIndex == txWireLength * 8U){
+        txBitIndex = 0;
+    txState = TX_FINISH;
     }
 #endif
 }
-
-
-void protocolProcess(void){
-#ifdef RECEIVER
-    uint8_t codeword[HEADER_BYTES];
-    uint32_t headerPacket;
-    int8_t decodeResult;
-
-    if (rxState != RX_ECC_PENDING){
-        return;
-    }
-
-    memcpy(codeword, (const void *)receivedHeader, sizeof(codeword));
-    decodeResult = rsDecodeHeader(codeword);
-
-    if (decodeResult < 0){
-        resetReceiver();
-        return;
-    }
-
-    headerPacket =
-        ((uint32_t)codeword[0] << 16) |
-        ((uint32_t)codeword[1] << 8) |
-        codeword[2];
-
-    if ((((headerPacket >> 20) & UINT8_C(0x0F)) != START_PATTERN) ||
-        ((headerPacket & UINT8_C(0x0F)) != END_PATTERN)){
-        resetReceiver();
-        return;
-    }
-
-    memcpy((void *)receivedHeader, codeword, sizeof(codeword));
-    receivedMessageLength =
-        (uint16_t)((headerPacket >> 4) & UINT16_C(0xFFFF));
-    correctedSymbolCount = decodeResult;
-    rxState = RX_READY;
-#endif
-}
-
 
 void PROTOCOL_ISR_ATTR protocolReceiveTick(bool sample){
 #ifdef RECEIVER
-    uint8_t currentSample = sample ? 1 : 0;
-
+    uint8_t current = sample ? 1U : 0U;
+    if (resetRequested){
+        resetReceiver();
+        resetRequested = false;
+        previousSample = current;
+        return;
+    }
     if (rxState == RX_READY){
-        previousSample = currentSample;
+        previousSample = current;
         return;
     }
-
     if (rxState == RX_WAITING){
-        if ((previousSample == 0) && (currentSample == 1)){
+        if (!previousSample && current){
             rxState = RX_PREAMBLE;
-
-            preambleCount = 0;
-            expectedPreambleBit = 1;
-            receivedSyncword = 0;
-            syncwordCount = 0;
-
-            samplePhase = 0;
-            highSampleCount = 0;
-
-            if (receiverProgress == 0){
-                receiverProgress = 1;
-            }
+            receiverProgress = 1;
+            samplePhase = highSampleCount = 0;
         }
-
-        previousSample = currentSample;
+        previousSample = current;
         return;
     }
-
     samplePhase++;
-
-    if ((samplePhase <= VOTE_SAMPLES) && currentSample){
+    if (samplePhase <= 3U && current){
         highSampleCount++;
     }
-
-    // Vote on three samples from inside the bit. Two matching samples win.
-    if (samplePhase == VOTE_SAMPLES){
-        uint8_t bitValue = (highSampleCount >= 2) ? 1 : 0;
-        processReceivedBit(bitValue);
+    if (samplePhase == 3U){
+        processReceivedBit(highSampleCount >= 2U);
     }
-
-    if (samplePhase >= SAMPLES_PER_BIT){
-        samplePhase = 0;
-        highSampleCount = 0;
+    if (samplePhase >= 4U){
+        samplePhase = highSampleCount = 0;
     }
-
-    previousSample = currentSample;
+    previousSample = current;
 #else
     (void)sample;
 #endif
 }
 
+// Complete wire bytes are immutable while main-loop ECC runs.
+void protocolProcess(void){
+#ifdef RECEIVER
+    if (resetRequested || rxState != RX_DATA){
+        return;
+    }
+    if (!headerDecoded){
+        uint8_t codeword[HEADER_BYTES];
+        for (uint8_t i = 0; i < HEADER_BYTES; i++) codeword[i] = receivedHeader[i];
+        int8_t result = rsDecode(codeword, HEADER_BYTES);
+        uint32_t header = ((uint32_t)codeword[0] << 16) |
+                          ((uint32_t)codeword[1] << 8) | codeword[2];
+        uint16_t length = (header >> 4) & 0xFFFFU;
+        if (result < 0 || (header >> 20) != START_PATTERN ||
+            (header & 0xFU) != END_PATTERN || length == 0 ||
+            length > PROTOCOL_MAX_MESSAGE_BYTES){
+            protocolResetReceiver();
+            return;
+        }
+        receivedLength = length;
+        correctedSymbols = result;
+        headerDecoded = true;
+    }
+    uint16_t expectedPackets = (receivedLength + 5U) / 6U;
+    while (decodedPackets < expectedPackets &&
+           rxWireBytes >= (decodedPackets + 1U) * PROTOCOL_PACKET_BYTES){
+        uint16_t offset = decodedPackets * PROTOCOL_PACKET_BYTES;
+        if (rxWire[offset] != 0xAA || rxWire[offset + 1U] != 0xD3 ||
+            rxWire[offset + 12U] != 0x55 || rxWire[offset + 13U] != 0x2C){
+            protocolResetReceiver();
+            return;
+        }
+        uint8_t codeword[DATA_CODEWORD_BYTES];
+        for (uint8_t i = 0; i < DATA_CODEWORD_BYTES; i++)
+            codeword[i] = rxWire[offset + 2U + i];
+        int8_t result = rsDecode(codeword, DATA_CODEWORD_BYTES);
+        if (result < 0){
+            protocolResetReceiver();
+            return;
+        }
+        correctedSymbols += result;
+        uint16_t remaining = receivedLength - messageBytes;
+        uint8_t count = remaining > 6U ? 6U : (uint8_t)remaining;
+        memcpy(rxMessage + messageBytes, codeword, count);
+        messageBytes += count;
+        decodedPackets++;
+    }
+    if (decodedPackets == expectedPackets){
+        rxState = RX_READY;
+        receiverProgress = 5;
+    }
+#endif
+}
 
 bool protocolIsReady(void){
 #ifdef RECEIVER
-    return rxState == RX_READY;
+    return !resetRequested && rxState == RX_READY;
 #else
     return false;
 #endif
@@ -644,37 +574,44 @@ bool protocolIsTransmitting(void){
 }
 
 
-uint8_t protocolGetReceiverProgress(void){
+const uint8_t *protocolGetMessageData(void){
 #ifdef RECEIVER
-    return receiverProgress;
+    return rxMessage;
 #else
-    return 0;
+    return NULL;
 #endif
 }
 
 
 uint16_t protocolGetMessageLength(void){
 #ifdef RECEIVER
-    return receivedMessageLength;
+    return receivedLength;
 #else
     return 0;
 #endif
 }
 
 
-int8_t protocolGetCorrectedSymbolCount(void){
+int16_t protocolGetCorrectedSymbolCount(void){
 #ifdef RECEIVER
-    return correctedSymbolCount;
+    return correctedSymbols;
 #else
-    return -1;
+    return 0;
+#endif
+}
+
+
+uint8_t protocolGetReceiverProgress(void){
+#ifdef RECEIVER
+    return resetRequested ? 0 : receiverProgress;
+#else
+    return 0;
 #endif
 }
 
 
 void protocolResetReceiver(void){
 #ifdef RECEIVER
-    previousSample = 0;
-    receiverProgress = 0;
-    resetReceiver();
+    resetRequested = true;
 #endif
 }
