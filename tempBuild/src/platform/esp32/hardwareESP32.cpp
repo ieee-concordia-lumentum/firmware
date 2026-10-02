@@ -5,12 +5,14 @@
 #include "protocol.h"
 
 
-// Connect sender GPIO 26 directly to receiver GPIO 21.
+// Sender output GPIO 18; receiver digital input GPIO 19.
+// For a wired test, connect those pins and a common ground.
+// For an optical test, GPIO 19 needs a conditioned digital receiver signal.
 constexpr uint8_t transmissionPin = 18;
 constexpr uint8_t receivePin = 19;
 constexpr uint8_t ledPin = 2;
 
-constexpr uint32_t timerFrequency = 38400;
+constexpr uint32_t timerFrequency = PROTOCOL_SPEED_KBPS * 1000UL * 4UL;
 constexpr uint16_t timerDivider = 80000000UL / timerFrequency;
 constexpr uint64_t senderAlarmTicks = 4;
 constexpr uint64_t receiverAlarmTicks = 1;
@@ -92,3 +94,4 @@ extern "C"{
 #endif
     }
 }
+
