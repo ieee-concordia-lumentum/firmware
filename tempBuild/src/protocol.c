@@ -8,6 +8,18 @@
 #error "Define SENDER or RECEIVER"
 #endif
 
+/* How a message travels over the link (highest bit of each byte first):
+ * First send 16 alternating 1/0 bits so the receiver can find bit timing.
+ * Next send D3 to confirm the start, then a 7-byte header and data packets.
+ * Header: 4-bit A marker | 16-bit message length | 4-bit 5 marker,
+ * followed by 4 extra bytes for error correction. Each data packet is:
+ * AA D3 | 6 message bytes | 4 error-correction bytes | 55 2C.
+ * Reed-Solomon uses those extra bytes to repair up to 2 damaged bytes in
+ * each header or data block. The packet markers have no error protection.
+ * A codeword means the original bytes together with their correction bytes.
+ * The timer interrupt handles individual bits; the main loop does the
+ * slower error-correction work so it does not delay receiver sampling.
+ */
 #define PREAMBLE 0xAAAAU
 #define SYNCWORD 0xD3U
 #define START_PATTERN 0xAU
@@ -23,6 +35,9 @@ static uint8_t gfLog[256];
 static uint8_t rsGenerator[RS_ECC_SYMBOLS + 1];
 
 
+// Error correction uses special arithmetic on byte values, called GF(256).
+// Multiplication uses lookup tables: add the two log-table entries, then
+// look up the result in the exponent table. Handle zero separately.
 static uint8_t gfMultiply(uint8_t a, uint8_t b){
     if ((a == 0) || (b == 0)){
         return 0;
@@ -32,6 +47,9 @@ static uint8_t gfMultiply(uint8_t a, uint8_t b){
 }
 
 
+// Find the value that multiplies with this byte to give 1 in GF(256).
+// Multiplying by this inverse performs division in the correction formulas.
+// Zero has no inverse; return 0 as a fallback.
 static uint8_t gfInverse(uint8_t value){
     if (value == 0){
         return 0;
@@ -41,6 +59,10 @@ static uint8_t gfInverse(uint8_t value){
 }
 
 
+// Prepare the lookup tables used by both encoding and decoding.
+// 0x11D defines how values wrap back into one byte in this arithmetic.
+// Then build the generator: the shared polynomial used to calculate the
+// four correction bytes. Its roots are the first four exponent-table values.
 static void rsInit(void){
     uint16_t value = 1;
     uint8_t degree;
@@ -76,6 +98,9 @@ static void rsInit(void){
 }
 
 
+// Treat the byte array as polynomial coefficients, highest power first.
+// Evaluate it by repeatedly multiplying the running result and adding the
+// next byte. In GF(256), addition and subtraction both use XOR.
 static uint8_t polynomialEvaluate(const uint8_t *polynomial,
                                   uint8_t length,
                                   uint8_t value){
@@ -89,6 +114,10 @@ static uint8_t polynomialEvaluate(const uint8_t *polynomial,
 }
 
 
+// Keep the original bytes and calculate four extra error-correction bytes.
+// Divide a temporary copy, with four zeros appended, by the generator.
+// The last four remaining bytes are the correction bytes to append.
+// A 3-byte header becomes 7 bytes; a 6-byte message block becomes 10 bytes.
 static void rsEncode(const uint8_t *header, uint8_t dataLength, uint8_t *codeword){
     uint8_t remainder[DATA_CODEWORD_BYTES];
 
@@ -115,8 +144,10 @@ static void rsEncode(const uint8_t *header, uint8_t dataLength, uint8_t *codewor
 }
 
 
-// Returns 0 for no error, 1 or 2 for the number of corrected byte symbols,
-// and -1 when the codeword cannot be corrected.
+// Check a received block and try to repair up to two damaged bytes in place.
+// Returns 0 if all checks already pass, or 1/2 for the repaired byte count,
+// and -1 if no valid repair is found. More than two damaged bytes can lead
+// to an incorrect repair or pass unnoticed; this is not a checksum guarantee.
 static int8_t rsDecode(uint8_t *codeword, uint8_t codewordLength){
     uint8_t syndrome[RS_ECC_SYMBOLS];
     uint8_t syndrome0;
@@ -124,6 +155,8 @@ static int8_t rsDecode(uint8_t *codeword, uint8_t codewordLength){
     uint8_t syndrome2;
     uint8_t syndrome3;
 
+    // These four results (syndromes) are error checks: a valid block gives
+    // zero at every generator root. Nonzero results guide the repair.
     for (uint8_t index = 0; index < RS_ECC_SYMBOLS; index++){
         syndrome[index] = polynomialEvaluate(
             codeword, codewordLength, gfExp[index]);
@@ -139,6 +172,9 @@ static int8_t rsDecode(uint8_t *codeword, uint8_t codewordLength){
     syndrome2 = syndrome[2];
     syndrome3 = syndrome[3];
 
+    // First try a one-byte repair. S0 gives the bits to flip in that byte;
+    // S1 divided by S0 gives its position in polynomial form.
+    // Check S2 and S3 agree before trying the repair and checking it again.
     if (syndrome0 != 0){
         uint8_t location = gfMultiply(syndrome1, gfInverse(syndrome0));
 
@@ -176,6 +212,9 @@ static int8_t rsDecode(uint8_t *codeword, uint8_t codewordLength){
     }
 
     {
+        // If one-byte repair failed, use all four checks to locate two errors.
+        // sigma1 and sigma2 describe a polynomial that identifies the positions.
+        // If the formula denominator is zero, these equations cannot locate them.
         uint8_t determinant =
             gfMultiply(syndrome1, syndrome1) ^
             gfMultiply(syndrome0, syndrome2);
@@ -200,6 +239,8 @@ static int8_t rsDecode(uint8_t *codeword, uint8_t codewordLength){
                 gfMultiply(syndrome2, syndrome2),
             gfInverse(determinant));
 
+        // Try each byte position. A zero polynomial result marks an error.
+        // Degree 0 refers to the last byte, so convert it back to an array index.
         for (uint8_t degree = 0; degree < codewordLength; degree++){
             uint8_t location = gfExp[degree];
             uint8_t inverseLocation = gfInverse(location);
@@ -227,6 +268,9 @@ static int8_t rsDecode(uint8_t *codeword, uint8_t codewordLength){
         }
 
         {
+            // Use the two positions and the first two checks to find which
+            // bits to flip in each byte. XOR applies these changes.
+            // Repeat all four checks; undo the changes if any check still fails.
             uint8_t denominator = location2 ^ location1;
             uint8_t error1 = gfMultiply(
                 gfMultiply(syndrome0, location2) ^ syndrome1,
@@ -263,6 +307,8 @@ typedef enum{
     TX_DATA,
     TX_FINISH
 } TxState;
+// The main loop builds the bytes before setting inTransmission to true.
+// The timer interrupt sends one bit per tick; these bytes stay unchanged.
 static volatile TxState txState;
 static volatile bool inTransmission;
 static uint8_t encodedHeader[HEADER_BYTES];
@@ -278,6 +324,9 @@ typedef enum{
     RX_DATA,
     RX_READY
 } RxState;
+// The timer interrupt collects bits into bytes; the main loop repairs them.
+// volatile tells the compiler these values can change outside the current
+// code path, for example when a timer interrupt updates reception progress.
 static volatile RxState rxState;
 static volatile bool resetRequested;
 static volatile uint8_t previousSample;
@@ -300,6 +349,7 @@ static bool headerDecoded;
 static int16_t correctedSymbols;
 static volatile uint8_t receiverProgress;
 
+// Forget the previous frame and wait for the start of a new message.
 static void PROTOCOL_ISR_ATTR resetReceiver(void){
     rxState = RX_WAITING;
     samplePhase = highSampleCount = 0;
@@ -313,6 +363,9 @@ static void PROTOCOL_ISR_ATTR resetReceiver(void){
     receiverProgress = 0;
 }
 
+// Handle one decided bit: check the alternating start pattern and D3,
+// then collect the header and packet bytes. A bad start returns to waiting.
+// Error correction happens later in the main loop to keep this interrupt short.
 static void PROTOCOL_ISR_ATTR processReceivedBit(uint8_t bit){
     switch (rxState){
         case RX_PREAMBLE:
@@ -378,6 +431,10 @@ void protocolInit(void){
 #endif
 }
 
+// Reject invalid requests or a request made while another message is sending.
+// Build the header and split the message into groups of six bytes.
+// Fill unused bytes of the final group with zeros. The header length tells
+// the receiver which bytes are real data. Start sending only when ready.
 bool protocolTransmit(const uint8_t *data, uint16_t length){
 #ifdef SENDER
     if (inTransmission || data == NULL || length == 0 ||
@@ -414,6 +471,10 @@ bool protocolTransmit(const uint8_t *data, uint16_t length){
 #endif
 }
 
+// Send one bit whenever the sender timer fires. The current state chooses
+// the start pattern, D3, header, or packet data. Reset the bit counter when
+// changing stages. After the final bit has had its full interval, set the
+// output LOW and mark the sender as available for the next message.
 void PROTOCOL_ISR_ATTR protocolTransmitTick(void){
 #ifdef SENDER
     if (!inTransmission){
@@ -464,6 +525,11 @@ void PROTOCOL_ISR_ATTR protocolTransmitTick(void){
 #endif
 }
 
+// Read the input four times per transmitted bit. A LOW-to-HIGH change
+// starts the timing count. For each bit, use the next three readings:
+// two or more HIGH readings mean 1; otherwise the bit is 0.
+// The fourth reading finishes that bit interval without adding a vote.
+// Stop collecting once the message is ready, until the application resets.
 void PROTOCOL_ISR_ATTR protocolReceiveTick(bool sample){
 #ifdef RECEIVER
     uint8_t current = sample ? 1U : 0U;
@@ -502,12 +568,15 @@ void PROTOCOL_ISR_ATTR protocolReceiveTick(bool sample){
 #endif
 }
 
-// Complete wire bytes are immutable while main-loop ECC runs.
+// Run from the main loop. Repair and check collected bytes while the timer
+// continues receiving later bytes. The timer does not rewrite completed bytes
+// until reception is reset.
 void protocolProcess(void){
 #ifdef RECEIVER
     if (resetRequested || rxState != RX_DATA){
         return;
     }
+    // Repair the header, check its markers, and reject an invalid length.
     if (!headerDecoded){
         uint8_t codeword[HEADER_BYTES];
         for (uint8_t i = 0; i < HEADER_BYTES; i++) codeword[i] = receivedHeader[i];
@@ -525,6 +594,9 @@ void protocolProcess(void){
         correctedSymbols = result;
         headerDecoded = true;
     }
+    // Round the length up to groups of six and wait for each full packet.
+    // Check packet markers, repair its data, and append it to the message.
+    // Ignore padding in the final packet. A failed check discards this frame.
     uint16_t expectedPackets = (receivedLength + 5U) / 6U;
     while (decodedPackets < expectedPackets &&
            rxWireBytes >= (decodedPackets + 1U) * PROTOCOL_PACKET_BYTES){
@@ -549,6 +621,7 @@ void protocolProcess(void){
         messageBytes += count;
         decodedPackets++;
     }
+    // All packets passed: make the completed message available to the caller.
     if (decodedPackets == expectedPackets){
         rxState = RX_READY;
         receiverProgress = 5;
@@ -574,6 +647,7 @@ bool protocolIsTransmitting(void){
 }
 
 
+// Return the internal message buffer. Copy it before requesting a reset.
 const uint8_t *protocolGetMessageData(void){
 #ifdef RECEIVER
     return rxMessage;
@@ -601,6 +675,7 @@ int16_t protocolGetCorrectedSymbolCount(void){
 }
 
 
+// Progress: 0 waiting, 1 start pattern, 2 sync, 3 header, 4 data, 5 ready.
 uint8_t protocolGetReceiverProgress(void){
 #ifdef RECEIVER
     return resetRequested ? 0 : receiverProgress;
@@ -610,6 +685,8 @@ uint8_t protocolGetReceiverProgress(void){
 }
 
 
+// Ask the timer interrupt to reset on its next reading. This avoids
+// clearing collection state while the interrupt is working on a bit.
 void protocolResetReceiver(void){
 #ifdef RECEIVER
     resetRequested = true;
