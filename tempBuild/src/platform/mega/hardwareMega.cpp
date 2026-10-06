@@ -48,21 +48,12 @@ extern "C" {
     }
 
 
-    bool transmitBit(char bitValue){
-        if (bitValue == '1'){
-            digitalWrite(transmissionPin, HIGH);
-            digitalWrite(ledPin, HIGH);
-        }
-        else if (bitValue == '0'){
-            digitalWrite(transmissionPin, LOW);
-            digitalWrite(ledPin, LOW);
-        }
-        else{
-            return false;
-        }
-
-        return true;
+#ifdef SENDER
+    void transmitBit(GpioState bit){
+        digitalWrite(transmissionPin, static_cast<uint8_t>(bit));
+        digitalWrite(ledPin, static_cast<uint8_t>(bit));
     }
+#endif
 }
 
 
