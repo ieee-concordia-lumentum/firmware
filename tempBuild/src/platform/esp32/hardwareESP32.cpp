@@ -75,8 +75,8 @@ extern "C"{
 
 #ifdef SENDER
     void transmitBit(GpioState bit){
-        gpio_set_level(transmissionPin, static_cast<uint32_t>(bit));
-        gpio_set_level(ledPin, static_cast<uint32_t>(bit));
+        gpio_set_level(transmissionPin, bit);
+        gpio_set_level(ledPin, bit);
     }
 #endif
 }
