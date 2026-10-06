@@ -8,9 +8,9 @@
 // Sender output GPIO 18; receiver digital input GPIO 19.
 // For a wired test, connect those pins and a common ground.
 // For an optical test, GPIO 19 needs a conditioned digital receiver signal.
-constexpr uint8_t transmissionPin = 18;
-constexpr uint8_t receivePin = 19;
-constexpr uint8_t ledPin = 2;
+constexpr gpio_num_t transmissionPin = GPIO_NUM_18;
+constexpr gpio_num_t receivePin = GPIO_NUM_19;
+constexpr gpio_num_t ledPin = GPIO_NUM_2;
 
 constexpr uint32_t timerFrequency = PROTOCOL_SPEED_KBPS * 1000UL * 4UL;
 constexpr uint16_t timerDivider = 80000000UL / timerFrequency;
@@ -25,7 +25,7 @@ void ARDUINO_ISR_ATTR onTimer(){
     protocolTransmitTick();
 
 #elif defined(RECEIVER)
-    bool sample = gpio_get_level((gpio_num_t)receivePin);
+    bool sample = gpio_get_level(receivePin);
     protocolReceiveTick(sample);
 #endif
 }
@@ -40,14 +40,14 @@ extern "C"{
         pinMode(transmissionPin, OUTPUT);
         pinMode(ledPin, OUTPUT);
 
-        gpio_set_level((gpio_num_t)transmissionPin, 0);
-        gpio_set_level((gpio_num_t)ledPin, 0);
+        gpio_set_level(transmissionPin, 0);
+        gpio_set_level(ledPin, 0);
 
 #elif defined(RECEIVER)
         pinMode(receivePin, INPUT_PULLDOWN);
         pinMode(ledPin, OUTPUT);
 
-        gpio_set_level((gpio_num_t)ledPin, 0);
+        gpio_set_level(ledPin, 0);
 #endif
 
         transmissionTimer = timerBegin(0, timerDivider, true);
@@ -73,25 +73,11 @@ extern "C"{
     }
 
 
-    bool transmitBit(char bitValue){
 #ifdef SENDER
-        if (bitValue == '1'){
-            gpio_set_level((gpio_num_t)transmissionPin, 1);
-            gpio_set_level((gpio_num_t)ledPin, 1);
-        }
-        else if (bitValue == '0'){
-            gpio_set_level((gpio_num_t)transmissionPin, 0);
-            gpio_set_level((gpio_num_t)ledPin, 0);
-        }
-        else{
-            return false;
-        }
-
-        return true;
-#else
-        (void)bitValue;
-        return false;
-#endif
+    void transmitBit(GpioState bit){
+        gpio_set_level(transmissionPin, static_cast<uint32_t>(bit));
+        gpio_set_level(ledPin, static_cast<uint32_t>(bit));
     }
+#endif
 }
 
