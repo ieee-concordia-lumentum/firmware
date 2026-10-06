@@ -436,14 +436,14 @@ void PROTOCOL_ISR_ATTR protocolTransmitTick(void){
                    (7U - txBitIndex % 8U)) & 1U;
             break;
         case TX_FINISH:
-            transmitBit('0');
+            transmitBit(Low);
             txState = TX_IDLE;
             inTransmission = false;
             return;
         default:
             return;
     }
-    transmitBit(bit ? '1' : '0');
+    transmitBit(bit ? High : Low);
     txBitIndex++;
     if (txState == TX_PREAMBLE && txBitIndex == 16U){
         txBitIndex = 0;

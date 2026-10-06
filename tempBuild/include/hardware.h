@@ -8,7 +8,10 @@ extern "C" {
 #endif
 
 void hardwareInit(void);
-bool transmitBit(char bitValue);
+#ifdef SENDER
+typedef enum { Low = 0, High = 1 } GpioState;
+void transmitBit(GpioState bit);
+#endif
 
 #ifdef __cplusplus
 }
