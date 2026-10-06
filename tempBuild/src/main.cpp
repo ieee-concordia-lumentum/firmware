@@ -11,15 +11,15 @@ constexpr unsigned long testDurationMs = 15UL * 60UL * 1000UL;
 constexpr unsigned long interMessageGapMs = 5;
 constexpr unsigned long receptionTimeoutMs = 250;
 
-static uint32_t messageChecksum(const uint8_t *data, size_t length){
-    uint32_t checksum = 0xFFFFFFFFUL;
+static uint32_t messageChecksum(const char *data, size_t length){
+    uint32_t checksum = 0xFFFFFFFF;
 
     for (size_t index = 0; index < length; index++){
-        checksum ^= data[index];
+        checksum ^= static_cast<uint8_t>(data[index]);
 
         for (uint8_t bit = 0; bit < 8; bit++){
             checksum = (checksum >> 1) ^
-                ((checksum & 1U) ? 0xEDB88320UL : 0UL);
+                ((checksum & 1U) ? 0xEDB88320 : 0);
         }
     }
 
@@ -77,8 +77,7 @@ static void processSender(void){
         return;
     }
 
-    if (sentMessages > 0 &&
-        currentTime - transmissionFinished < interMessageGapMs){
+    if (sentMessages > 0 && currentTime - transmissionFinished < interMessageGapMs){
         return;
     }
 
@@ -88,8 +87,7 @@ static void processSender(void){
     int prefixLength = snprintf(message, sizeof(message), "%06lu,%s",
                                 (unsigned long)(sentMessages + 1), word);
 
-    uint32_t checksum = messageChecksum(
-        reinterpret_cast<const uint8_t *>(message), prefixLength);
+    uint32_t checksum = messageChecksum(message, prefixLength);
 
     int length = snprintf(message + prefixLength,
                           sizeof(message) - prefixLength,
@@ -118,7 +116,7 @@ static void writeLogRow(const char *row){
     size_t length = strlen(row);
 
     if ((size_t)Serial.availableForWrite() >= length){
-        Serial.write(reinterpret_cast<const uint8_t *>(row), length);
+        Serial.write(row, length);
     }
     else{
         loggingDrops++;
@@ -164,8 +162,7 @@ static void processReceiver(void){
                 strtoul(separator + 1, &checksumEnd, 16);
 
             checksumValid = *checksumEnd == 0 &&
-                messageChecksum(reinterpret_cast<const uint8_t *>(message),
-                                separator - message) == expectedChecksum;
+                messageChecksum(message, separator - message) == expectedChecksum;
         }
 
         receivedMessages++;
