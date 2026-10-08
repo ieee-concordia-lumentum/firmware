@@ -16,18 +16,27 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-void protocolInit(void);
-bool protocolTransmit(const uint8_t *data, uint16_t length);
-void protocolProcess(void);
-void PROTOCOL_ISR_ATTR protocolTransmitTick(void);
-void PROTOCOL_ISR_ATTR protocolReceiveTick(bool sample);
-bool protocolIsReady(void);
-bool protocolIsTransmitting(void);
-const uint8_t *protocolGetMessageData(void);
-uint16_t protocolGetMessageLength(void);
-int16_t protocolGetCorrectedSymbolCount(void);
-uint8_t protocolGetReceiverProgress(void);
-void protocolResetReceiver(void);
+    enum ReceiveProgress {
+        PROG_WAITING,
+        PROG_START,
+        PROG_SYNC,
+        PROG_HEADER,
+        PROG_DATA,
+        PROG_READY
+    };
+
+    void protocolInit(void);
+    bool protocolTransmit(const uint8_t *data, uint16_t length);
+    void protocolProcess(void);
+    void PROTOCOL_ISR_ATTR protocolTransmitTick(void);
+    void PROTOCOL_ISR_ATTR protocolReceiveTick(bool sample);
+    bool protocolIsReady(void);
+    bool protocolIsTransmitting(void);
+    const uint8_t *protocolGetMessageData(void);
+    uint16_t protocolGetMessageLength(void);
+    int16_t protocolGetCorrectedSymbolCount(void);
+    enum ReceiveProgress protocolGetReceiverProgress(void);
+    void protocolResetReceiver(void);
 #ifdef __cplusplus
 }
 #endif
