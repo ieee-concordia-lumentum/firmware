@@ -14,3 +14,19 @@ Replace COM3 with the receiver port.
 All messages must pass CRC before being treated as valid.
 Sequence gaps include both optical loss and any serial logging drops.
 A 5 ms gap is a conservative starting point, not a measured maximum cadence.
+
+ECC repair test (PC only, no flashing or wiring required):
+From tempBuild in PowerShell, run:
+    .\test\run_ecc_test.ps1
+Requires GCC on PATH (available on this computer).
+It uses the actual ECC code from src/protocol.c, not a copied algorithm.
+For four example payloads, it tests the 7-byte header and 10-byte data block:
+- An unchanged block must return 0 and keep all bytes unchanged.
+- Every single-byte corruption must return 1 and restore every byte.
+- Every two-byte corruption must return 2 and restore every byte.
+All positions and all nonzero XOR masks are tried, including parity bytes.
+Expect PASS with zero failures; a failing run prints the first ten bad cases.
+The script builds a temporary executable and removes it after the run.
+This does not test the optical link, receiver sampling, or complete frames.
+More than two damaged bytes may be rejected or incorrectly repaired; use
+message CRC checking on the receiver to detect additional corruption.
