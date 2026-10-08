@@ -125,13 +125,9 @@ static void writeLogRow(const char *row){
 
 
 static void processReceiver(void){
-    uint8_t progress = protocolGetReceiverProgress();
-
-    if (progress == 0){
+    if (protocolGetReceiverProgress() == PROG_WAITING)
         receiving = false;
-    }
-
-    if (progress > 0 && !receiving){
+    else if (!receiving) {
         receiving = true;
         receptionStarted = millis();
     }

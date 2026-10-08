@@ -47,10 +47,9 @@ static void testBlock(const uint8_t *payload, uint8_t payloadLength) {
      * covers payload/parity combinations and errors with equal magnitudes. */
     for (int first = 0; first < length; first++)
         for (int second = first + 1; second < length; second++)
-            for (unsigned mask1 = 1; mask1 <= 255; mask1++)
-                for (unsigned mask2 = 1; mask2 <= 255; mask2++)
-                    checkRepair(original, length, first, second,
-                                (uint8_t)mask1, (uint8_t)mask2);
+            for (uint8_t  mask1 = 1; mask1 <= 255; mask1++)
+                for (uint8_t mask2 = 1; mask2 <= 255; mask2++)
+                    checkRepair(original, length, first, second, mask1, mask2);
 }
 
 int main(void) {
@@ -64,7 +63,6 @@ int main(void) {
     puts("Testing the firmware ECC (no board needed)...");
     for (unsigned i = 0; i < sizeof(payloads) / sizeof(payloads[0]); i++) {
         printf("Payload %u: testing 7-byte header and 10-byte data block...\n", i + 1);
-        fflush(stdout);
         testBlock(payloads[i], 3);
         testBlock(payloads[i], 6);
     }
