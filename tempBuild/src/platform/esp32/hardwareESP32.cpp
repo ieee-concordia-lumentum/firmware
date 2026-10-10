@@ -5,17 +5,18 @@
 #include "protocol.h"
 
 
-// Sender output GPIO 18; receiver digital input GPIO 19.
+// Sender laser TTL output GPIO 19; receiver digital input GPIO 18.
 // For a wired test, connect those pins and a common ground.
-// For an optical test, GPIO 19 needs a conditioned digital receiver signal.
-constexpr gpio_num_t transmissionPin = GPIO_NUM_18;
-constexpr gpio_num_t receivePin = GPIO_NUM_19;
+// BPW34 requires a conditioned, active-HIGH 3.3 V digital signal on GPIO 18.
+constexpr gpio_num_t transmissionPin = GPIO_NUM_19;
+constexpr gpio_num_t receivePin = GPIO_NUM_18;
 constexpr gpio_num_t ledPin = GPIO_NUM_2;
 
-constexpr uint32_t timerFrequency = PROTOCOL_SPEED_KBPS * 1000UL * 4UL;
-constexpr uint16_t timerDivider = 80000000UL / timerFrequency;
-constexpr uint64_t senderAlarmTicks = 4;
-constexpr uint64_t receiverAlarmTicks = 1;
+// Use a 1 MHz timer so alarm ticks represent microseconds.
+constexpr uint16_t timerDivider = 80;
+constexpr uint64_t senderAlarmTicks = PROTOCOL_BIT_PERIOD_US;
+constexpr uint64_t receiverAlarmTicks = PROTOCOL_BIT_PERIOD_US / 4UL;
+static_assert(PROTOCOL_BIT_PERIOD_US % 4UL == 0, "Bit period must divide into four samples.");
 
 hw_timer_t *transmissionTimer = nullptr;
 

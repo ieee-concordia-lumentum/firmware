@@ -348,6 +348,16 @@ static uint8_t rxMessage[PROTOCOL_MAX_MESSAGE_BYTES];
 static bool headerDecoded;
 static int16_t correctedSymbols;
 static volatile uint8_t receiverProgress;
+static volatile uint32_t debugEdges;
+static volatile uint32_t debugErrors;
+static uint32_t debugPackets;
+static volatile uint8_t debugLastError;
+
+// Codes: 1 preamble, 2 sync, 3 header, 4 packet markers, 5 packet ECC.
+static void PROTOCOL_ISR_ATTR recordReceiverError(uint8_t error){
+    debugLastError = error;
+    debugErrors++;
+}
 
 // Forget the previous frame and wait for the start of a new message.
 static void PROTOCOL_ISR_ATTR resetReceiver(void){
@@ -370,6 +380,7 @@ static void PROTOCOL_ISR_ATTR processReceivedBit(uint8_t bit){
     switch (rxState){
         case RX_PREAMBLE:
             if (bit != ((preambleCount & 1U) ? 0U : 1U)){
+                recordReceiverError(1);
                 resetReceiver();
                 return;
             }
@@ -382,6 +393,7 @@ static void PROTOCOL_ISR_ATTR processReceivedBit(uint8_t bit){
             syncValue = (uint8_t)((syncValue << 1) | bit);
             if (++syncCount == 8U){
                 if (syncValue != SYNCWORD){
+                    recordReceiverError(2);
                     resetReceiver();
                     return;
                 }
@@ -427,6 +439,8 @@ void protocolInit(void){
     txBitIndex = 0;
 #else
     previousSample = 0;
+    debugEdges = debugErrors = debugPackets = 0;
+    debugLastError = 0;
     resetReceiver();
 #endif
 }
@@ -533,6 +547,9 @@ void PROTOCOL_ISR_ATTR protocolTransmitTick(void){
 void PROTOCOL_ISR_ATTR protocolReceiveTick(bool sample){
 #ifdef RECEIVER
     uint8_t current = sample ? 1U : 0U;
+    if (current != previousSample){
+        debugEdges++;
+    }
     if (resetRequested){
         resetReceiver();
         resetRequested = false;
@@ -587,6 +604,7 @@ void protocolProcess(void){
         if (result < 0 || (header >> 20) != START_PATTERN ||
             (header & 0xFU) != END_PATTERN || length == 0 ||
             length > PROTOCOL_MAX_MESSAGE_BYTES){
+            recordReceiverError(3);
             protocolResetReceiver();
             return;
         }
@@ -603,6 +621,7 @@ void protocolProcess(void){
         uint16_t offset = decodedPackets * PROTOCOL_PACKET_BYTES;
         if (rxWire[offset] != 0xAA || rxWire[offset + 1U] != 0xD3 ||
             rxWire[offset + 12U] != 0x55 || rxWire[offset + 13U] != 0x2C){
+            recordReceiverError(4);
             protocolResetReceiver();
             return;
         }
@@ -611,6 +630,7 @@ void protocolProcess(void){
             codeword[i] = rxWire[offset + 2U + i];
         int8_t result = rsDecode(codeword, DATA_CODEWORD_BYTES);
         if (result < 0){
+            recordReceiverError(5);
             protocolResetReceiver();
             return;
         }
@@ -620,6 +640,7 @@ void protocolProcess(void){
         memcpy(rxMessage + messageBytes, codeword, count);
         messageBytes += count;
         decodedPackets++;
+        debugPackets++;
     }
     // All packets passed: make the completed message available to the caller.
     if (decodedPackets == expectedPackets){
@@ -692,3 +713,20 @@ void protocolResetReceiver(void){
     resetRequested = true;
 #endif
 }
+#ifdef RECEIVER
+void protocolGetReceiverDebug(ProtocolReceiverDebug *debug){
+    if (debug == NULL){
+        return;
+    }
+    debug->edges = debugEdges;
+    debug->errors = debugErrors;
+    debug->packets = debugPackets;
+    debug->lastError = debugLastError;
+    debug->input = previousSample;
+    debug->progress = protocolGetReceiverProgress();
+    debug->headerBits = headerBitCount;
+    debug->wireBytes = rxWireBytes;
+    debug->length = receivedLength;
+    debug->corrected = correctedSymbols;
+}
+#endif
