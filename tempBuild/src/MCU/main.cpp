@@ -13,35 +13,8 @@
 
 static constexpr uint32_t USB_SERIAL_BAUD = 115200;
 
-// The internal CRC trailer is:
-// ',' + 8 hexadecimal characters = 9 bytes.
-static constexpr uint16_t CRC_TRAILER_BYTES = 9U;
-
-// Make this long enough for the largest message your protocol
-// supports at its current transmission speed.
-static constexpr unsigned long receptionTimeoutMs = 5000UL;
-
-// ============================================================
-// CRC-32
-// ============================================================
-
-static uint32_t messageChecksum(const uint8_t *data, size_t length)
-{
-    uint32_t checksum = 0xFFFFFFFF;
-
-    for (size_t index = 0; index < length; index++)
-    {
-        checksum ^= data[index];
-
-        for (uint8_t bit = 0; bit < 8; bit++)
-        {
-            checksum = (checksum >> 1) ^
-                       ((checksum & 1U) ? 0xEDB88320U : 0U);
-        }
-    }
-
-    return ~checksum;
-}
+// Physical frames contain bytes already encoded by the desktop.
+static constexpr unsigned long receptionTimeoutMs = 1000UL;
 
 #ifdef SENDER
 
@@ -52,16 +25,10 @@ static uint32_t messageChecksum(const uint8_t *data, size_t length)
 //     SEND <number-of-payload-bytes>\n
 //     <exactly that many raw payload bytes>
 //
-// The payload is UTF-8. It may contain newlines or commas.
-//
-// The ESP32 appends the CRC trailer before calling
-// protocolTransmit().
+// The payload is an encoded frame, not application text.
 // ============================================================
 
-static constexpr uint16_t MAX_DESKTOP_PAYLOAD_BYTES =
-    (PROTOCOL_MAX_MESSAGE_BYTES > CRC_TRAILER_BYTES)
-        ? (PROTOCOL_MAX_MESSAGE_BYTES - CRC_TRAILER_BYTES)
-        : 0U;
+static constexpr uint16_t MAX_DESKTOP_PAYLOAD_BYTES = PROTOCOL_FRAME_BYTES;
 
 static char senderCommandLine[32];
 static size_t senderCommandLineLength = 0;
@@ -73,7 +40,8 @@ static bool senderPayloadTooLong = false;
 static uint32_t senderExpectedPayloadLength = 0;
 static uint32_t senderPayloadBytesReceived = 0;
 
-static uint8_t senderPayload[PROTOCOL_MAX_MESSAGE_BYTES];
+static uint8_t senderPayload[PROTOCOL_FRAME_BYTES];
+static unsigned long senderPayloadStarted = 0;
 
 // Transmission status
 static bool transmissionPending = false;
@@ -115,47 +83,10 @@ static void finishDesktopPayload(void)
         return;
     }
 
-    // The text plus its CRC must fit the protocol's message buffer.
-    if (payloadLength + CRC_TRAILER_BYTES >
-        PROTOCOL_MAX_MESSAGE_BYTES)
+    // Only the desktop constructs packets and performs CRC/ECC.
+    if (!protocolTransmit(senderPayload, static_cast<uint16_t>(payloadLength)))
     {
-
-        senderPrintError("TOO_LONG");
-        return;
-    }
-
-    uint8_t wireMessage[PROTOCOL_MAX_MESSAGE_BYTES];
-
-    // Preserve the exact original UTF-8 bytes.
-    memcpy(wireMessage, senderPayload, payloadLength);
-
-    // Calculate CRC over the original text only.
-    const uint32_t checksum =
-        messageChecksum(senderPayload, payloadLength);
-
-    // Append the same trailer format used by your original test.
-    char checksumText[9];
-
-    snprintf(
-        checksumText,
-        sizeof(checksumText),
-        "%08lX",
-        static_cast<unsigned long>(checksum));
-
-    wireMessage[payloadLength] = ',';
-
-    memcpy(
-        wireMessage + payloadLength + 1,
-        checksumText,
-        8);
-
-    const uint16_t wireLength = static_cast<uint16_t>(
-        payloadLength + CRC_TRAILER_BYTES);
-
-    // protocolTransmit() copies the data into its own TX buffers.
-    if (!protocolTransmit(wireMessage, wireLength))
-    {
-        senderPrintError("TRANSMIT_REJECTED");
+        senderPrintError("INVALID_FRAME");
         return;
     }
 
@@ -220,11 +151,18 @@ static void handleSenderCommandLine(void)
         requestedLength > MAX_DESKTOP_PAYLOAD_BYTES;
 
     senderReadingPayload = true;
+    senderPayloadStarted = millis();
 }
 
 // Read incoming USB data without blocking the protocol timer.
 static void processSender(void)
 {
+    if (senderReadingPayload && millis() - senderPayloadStarted >= 5000UL)
+    {
+        senderReadingPayload = false;
+        senderPrintError("SERIAL_TIMEOUT");
+    }
+
     while (Serial.available() > 0)
     {
         const int incoming = Serial.read();
@@ -318,14 +256,14 @@ static void processSender(void)
 //
 // USB serial response format:
 //
-//   RX,<payload length>,<corrected symbols>,<CRC status>,<count>\n
-//   <exactly payload length raw UTF-8 bytes>\n
+//   RX,<encoded frame length>,<count>\n
+//   <exactly that many encoded bytes>\n
 //
-// The desktop reads the length before consuming the payload.
-// Therefore, newlines and commas in received text are safe.
+// Packet reconstruction, ECC, and CRC validation run on the desktop.
 // ============================================================
 
 static bool receiving = false;
+static bool receiverForwarding = false;
 static unsigned long receptionStarted = 0;
 
 static uint32_t receivedMessages = 0;
@@ -333,7 +271,7 @@ static uint32_t loggingDrops = 0;
 
 // The queue keeps USB logging from blocking the bit-reception timer.
 static constexpr size_t SERIAL_TX_QUEUE_CAPACITY =
-    2U * (static_cast<size_t>(PROTOCOL_MAX_MESSAGE_BYTES) + 96U);
+    2U * (static_cast<size_t>(PROTOCOL_FRAME_BYTES) + 96U);
 
 static uint8_t serialTxQueue[SERIAL_TX_QUEUE_CAPACITY];
 
@@ -401,47 +339,10 @@ static void flushSerialQueue(void)
     }
 }
 
-// Parse exactly eight hexadecimal characters without relying on
-// a null terminator in the incoming message buffer.
-static bool parseHex8(const uint8_t *text, uint32_t *result)
-{
-    uint32_t value = 0;
-
-    for (uint8_t index = 0; index < 8; index++)
-    {
-        const uint8_t character = text[index];
-        uint8_t digit;
-
-        if (character >= '0' && character <= '9')
-        {
-            digit = character - '0';
-        }
-        else if (character >= 'A' && character <= 'F')
-        {
-            digit = character - 'A' + 10;
-        }
-        else if (character >= 'a' && character <= 'f')
-        {
-            digit = character - 'a' + 10;
-        }
-        else
-        {
-            return false;
-        }
-
-        value = (value << 4) | digit;
-    }
-
-    *result = value;
-    return true;
-}
-
 // Put one complete message record into the nonblocking serial queue.
 static void queueReceivedMessage(
     const uint8_t *message,
     uint16_t payloadLength,
-    int16_t correctedSymbols,
-    bool checksumValid,
     uint32_t messageNumber)
 {
     char header[72];
@@ -449,10 +350,8 @@ static void queueReceivedMessage(
     const int headerLength = snprintf(
         header,
         sizeof(header),
-        "RX,%u,%d,%s,%lu\n",
+        "RX,%u,%lu\n",
         static_cast<unsigned>(payloadLength),
-        static_cast<int>(correctedSymbols),
-        checksumValid ? "OK" : "BAD",
         static_cast<unsigned long>(messageNumber));
 
     if (headerLength <= 0 ||
@@ -489,10 +388,73 @@ static void queueReceivedMessage(
     queueSerialBytes(&delimiter, 1);
 }
 
+// INFO replies use the same queue so they cannot interrupt a binary record.
+static void processReceiverCommands(void)
+{
+    static char commandLine[16];
+    static size_t commandLength = 0;
+    static bool discardCommand = false;
+
+    while (Serial.available() > 0)
+    {
+        const int value = Serial.read();
+
+        if (value < 0)
+        {
+            break;
+        }
+        if (value == '\r')
+        {
+            continue;
+        }
+        if (value == '\n')
+        {
+            commandLine[commandLength] = '\0';
+
+            if (!discardCommand && strcmp(commandLine, "INFO") == 0)
+            {
+                char reply[40];
+                int length = snprintf(reply, sizeof(reply), "READY,RECEIVER,%u\n",
+                                      static_cast<unsigned>(PROTOCOL_FRAME_BYTES));
+
+                if (length > 0 && static_cast<size_t>(length) < sizeof(reply) &&
+                    static_cast<size_t>(length) <= SERIAL_TX_QUEUE_CAPACITY - serialTxCount)
+                {
+                    queueSerialBytes(reinterpret_cast<const uint8_t *>(reply), length);
+                }
+            }
+
+            commandLength = 0;
+            discardCommand = false;
+        }
+        else if (commandLength < sizeof(commandLine) - 1U)
+        {
+            commandLine[commandLength++] = static_cast<char>(value);
+        }
+        else
+        {
+            discardCommand = true;
+        }
+    }
+}
+
 static void processReceiver(void)
 {
-    const enum ReceiveProgress progress =
-        protocolGetReceiverProgress();
+    processReceiverCommands();
+
+    // Keep the captured frame immutable until all queued USB bytes are sent.
+    if (receiverForwarding)
+    {
+        if (serialTxCount == 0)
+        {
+            protocolResetReceiver();
+            receiverForwarding = false;
+            receiving = false;
+        }
+        return;
+    }
+
+    const enum ReceiveProgress progress = protocolGetReceiverProgress();
 
     if (progress == PROG_WAITING)
     {
@@ -506,73 +468,27 @@ static void processReceiver(void)
 
     if (protocolIsReady())
     {
+        if (SERIAL_TX_QUEUE_CAPACITY - serialTxCount < PROTOCOL_FRAME_BYTES + 72U)
+        {
+            return;
+        }
+
         const uint16_t wireLength = protocolGetMessageLength();
 
-        if (wireLength > PROTOCOL_MAX_MESSAGE_BYTES)
+        if (wireLength != PROTOCOL_FRAME_BYTES)
         {
             protocolResetReceiver();
             receiving = false;
             return;
         }
 
-        uint8_t message[PROTOCOL_MAX_MESSAGE_BYTES];
-
-        // Copy before requesting the asynchronous protocol reset.
-        memcpy(
-            message,
-            protocolGetMessageData(),
-            wireLength);
-
-        const int16_t correctedSymbols =
-            protocolGetCorrectedSymbolCount();
-
-        uint16_t payloadLength = wireLength;
-        bool checksumValid = false;
-
-        // Our transmitter appends:
-        //     ',' + eight hexadecimal CRC-32 digits.
-        //
-        // Its location is based on the message length, not the last comma
-        // in the text, so commas and newlines in the original text work.
-        if (wireLength >= CRC_TRAILER_BYTES &&
-            message[wireLength - CRC_TRAILER_BYTES] == ',')
-        {
-
-            uint32_t expectedChecksum;
-
-            if (parseHex8(
-                    message + wireLength - 8U,
-                    &expectedChecksum))
-            {
-
-                payloadLength = wireLength - CRC_TRAILER_BYTES;
-
-                checksumValid =
-                    messageChecksum(message, payloadLength) ==
-                    expectedChecksum;
-            }
-        }
-
-        receivedMessages++;
-
-        queueReceivedMessage(
-            message,
-            payloadLength,
-            correctedSymbols,
-            checksumValid,
-            receivedMessages);
-
-        protocolResetReceiver();
-        receiving = false;
+        queueReceivedMessage(protocolGetMessageData(), wireLength, ++receivedMessages);
+        receiverForwarding = true;
         return;
     }
 
-    // This is a maximum whole-frame timeout, not a per-bit timeout.
-    // It is intentionally longer than the old 250 ms limit.
-    if (receiving &&
-        millis() - receptionStarted >= receptionTimeoutMs)
+    if (receiving && millis() - receptionStarted >= receptionTimeoutMs)
     {
-
         protocolResetReceiver();
         receiving = false;
     }
@@ -595,7 +511,8 @@ void setup()
 #ifdef SENDER
     senderPrintReady();
 #else
-    Serial.println("READY,RECEIVER");
+    Serial.printf("READY,RECEIVER,%u\n",
+                  static_cast<unsigned>(PROTOCOL_FRAME_BYTES));
 #endif
 }
 

@@ -2,9 +2,9 @@
 #include "hardware.h"
 #include <string.h>
 
-#if defined(SENDER) && defined(RECEIVER)
+#if !defined(DESKTOP) && defined(SENDER) && defined(RECEIVER)
 #error "Define only one device role"
-#elif !defined(SENDER) && !defined(RECEIVER)
+#elif !defined(DESKTOP) && !defined(SENDER) && !defined(RECEIVER)
 #error "Define SENDER or RECEIVER"
 #endif
 
@@ -19,8 +19,9 @@
  * Reed-Solomon uses those extra bytes to repair up to 2 damaged bytes in each
  * header or data block. The packet markers have no error protection.  A
  * codeword means the original bytes together with their correction bytes.
- * The timer interrupt handles individual bits; the main loop does the slower
- * error correction work so it does not delay receiver sampling.
+ * The computer builds/decodes packets and performs error correction.
+ * Each physical transfer contains a fixed PROTOCOL_FRAME_BYTES encoded body;
+ * unused packet space is zero padded. The MCU handles timing and byte recovery.
  */
 #define PREAMBLE 0xAAAAU
 #define SYNCWORD 0xD3U
@@ -32,6 +33,7 @@
 #define GF_PRIMITIVE_POLYNOMIAL 0x011DU
 #define MAX_PACKETS ((PROTOCOL_MAX_MESSAGE_BYTES + 5U) / 6U)
 #define MAX_WIRE_BYTES (MAX_PACKETS * PROTOCOL_PACKET_BYTES)
+#ifdef DESKTOP
 static uint8_t gfExp[512];
 static uint8_t gfLog[256];
 static uint8_t rsGenerator[RS_ECC_SYMBOLS + 1];
@@ -273,75 +275,152 @@ static int8_t rsDecode(uint8_t *codeword, uint8_t codewordLength){
 }
 
 
+#endif
+
+#ifdef DESKTOP
+
+void protocolInit(void){
+    rsInit();
+}
+
+// Keep the existing header, six-byte payload blocks, and packet markers.
+// Pad the unused physical space so the MCU never needs to decode a length.
+bool protocolEncode(const uint8_t *data, uint16_t length, uint8_t *frame){
+    if (data == NULL || frame == NULL || length == 0 ||
+        length > PROTOCOL_MAX_MESSAGE_BYTES){
+        return false;
+    }
+
+    memset(frame, 0, PROTOCOL_FRAME_BYTES);
+
+    uint32_t header = ((uint32_t)START_PATTERN << 20) |
+                      ((uint32_t)length << 4) | END_PATTERN;
+    uint8_t rawHeader[3] = {
+        (uint8_t)(header >> 16), (uint8_t)(header >> 8), (uint8_t)header
+    };
+
+    rsEncode(rawHeader, 3, frame);
+
+    for (uint16_t offset = 0, packetOffset = HEADER_BYTES;
+         offset < length; offset += 6, packetOffset += PROTOCOL_PACKET_BYTES){
+        uint8_t payload[6] = {0};
+        uint16_t remaining = length - offset;
+        uint8_t count = remaining > 6 ? 6 : (uint8_t)remaining;
+        memcpy(payload, data + offset, count);
+
+        uint8_t *packet = frame + packetOffset;
+        packet[0] = 0xAA;
+        packet[1] = 0xD3;
+        rsEncode(payload, 6, packet + 2);
+        packet[12] = 0x55;
+        packet[13] = 0x2C;
+    }
+
+    return true;
+}
+
+bool protocolDecode(const uint8_t *frame, uint16_t frameLength,
+                    uint8_t *message, uint16_t *length, int16_t *correctedSymbols){
+    if (frame == NULL || frameLength != PROTOCOL_FRAME_BYTES ||
+        message == NULL || length == NULL || correctedSymbols == NULL){
+        return false;
+    }
+
+    *length = 0;
+    *correctedSymbols = 0;
+
+    uint8_t codeword[DATA_CODEWORD_BYTES];
+    memcpy(codeword, frame, HEADER_BYTES);
+    int8_t result = rsDecode(codeword, HEADER_BYTES);
+    uint32_t header = ((uint32_t)codeword[0] << 16) |
+                      ((uint32_t)codeword[1] << 8) | codeword[2];
+    uint16_t messageLength = (header >> 4) & 0xFFFFU;
+
+    if (result < 0 || (header >> 20) != START_PATTERN ||
+        (header & 0xFU) != END_PATTERN || messageLength == 0 ||
+        messageLength > PROTOCOL_MAX_MESSAGE_BYTES){
+        return false;
+    }
+
+    int16_t corrections = result;
+    uint16_t messageBytes = 0;
+
+    for (uint16_t offset = HEADER_BYTES; messageBytes < messageLength;
+         offset += PROTOCOL_PACKET_BYTES){
+        const uint8_t *packet = frame + offset;
+
+        if (packet[0] != 0xAA || packet[1] != 0xD3 ||
+            packet[12] != 0x55 || packet[13] != 0x2C){
+            return false;
+        }
+
+        memcpy(codeword, packet + 2, DATA_CODEWORD_BYTES);
+        result = rsDecode(codeword, DATA_CODEWORD_BYTES);
+
+        if (result < 0){
+            return false;
+        }
+
+        corrections += result;
+        uint16_t remaining = messageLength - messageBytes;
+        uint8_t count = remaining > 6 ? 6 : (uint8_t)remaining;
+        memcpy(message + messageBytes, codeword, count);
+        messageBytes += count;
+    }
+
+    *length = messageLength;
+    *correctedSymbols = corrections;
+    return true;
+}
+
+#else
+
 #ifdef SENDER
 typedef enum{
     TX_IDLE,
     TX_PREAMBLE,
     TX_SYNC,
-    TX_HEADER,
     TX_DATA,
     TX_FINISH
 } TxState;
-// The main loop builds the bytes before setting inTransmission to true.
-// The timer interrupt sends one bit per tick; these bytes stay unchanged.
+
 static volatile TxState txState;
 static volatile bool inTransmission;
-static uint8_t encodedHeader[HEADER_BYTES];
-static uint8_t txWire[MAX_WIRE_BYTES];
-static uint16_t txWireLength;
+static uint8_t txWire[PROTOCOL_FRAME_BYTES];
 static volatile uint16_t txBitIndex;
 #else
 typedef enum{
     RX_WAITING,
     RX_PREAMBLE,
     RX_SYNC,
-    RX_HEADER,
     RX_DATA,
     RX_READY
 } RxState;
-// The timer interrupt collects bits into bytes; the main loop repairs them.
-// volatile tells the compiler these values can change outside the current
-// code path, for example when a timer interrupt updates reception progress.
+
 static volatile RxState rxState;
 static volatile bool resetRequested;
-static volatile uint8_t previousSample;
-static volatile uint8_t samplePhase;
-static volatile uint8_t highSampleCount;
-static volatile uint8_t preambleCount;
-static volatile uint8_t syncCount;
-static volatile uint8_t syncValue;
-static volatile uint8_t receivedHeader[HEADER_BYTES];
-static volatile uint8_t headerBitCount;
-static volatile uint8_t rxWire[MAX_WIRE_BYTES];
-static volatile uint16_t rxWireBytes;
+static uint8_t previousSample;
+static uint8_t samplePhase;
+static uint8_t highSampleCount;
+static uint8_t preambleCount;
+static uint8_t syncCount;
+static uint8_t syncValue;
 static uint8_t incomingByte;
 static uint8_t incomingBits;
-static uint16_t receivedLength;
-static uint16_t decodedPackets;
-static uint16_t messageBytes;
-static uint8_t rxMessage[PROTOCOL_MAX_MESSAGE_BYTES];
-static bool headerDecoded;
-static int16_t correctedSymbols;
-
+static uint8_t rxWire[PROTOCOL_FRAME_BYTES];
+static volatile uint16_t rxWireBytes;
 static volatile enum ReceiveProgress receiverProgress;
 
-// Forget the previous frame and wait for the start of a new message.
 static void PROTOCOL_ISR_ATTR resetReceiver(void){
     rxState = RX_WAITING;
     samplePhase = highSampleCount = 0;
     preambleCount = syncCount = syncValue = 0;
-    headerBitCount = 0;
-    rxWireBytes = 0;
     incomingByte = incomingBits = 0;
-    headerDecoded = false;
-    receivedLength = decodedPackets = messageBytes = 0;
-    correctedSymbols = 0;
+    rxWireBytes = 0;
     receiverProgress = PROG_WAITING;
 }
 
-// Handle one decided bit: check the alternating start pattern and D3,
-// then collect the header and packet bytes. A bad start returns to waiting.
-// Error correction happens later in the main loop to keep this interrupt short.
+// The MCU recognizes only physical synchronization and copies encoded bytes.
 static void PROTOCOL_ISR_ATTR processReceivedBit(uint8_t bit){
     switch (rxState){
         case RX_PREAMBLE:
@@ -354,6 +433,7 @@ static void PROTOCOL_ISR_ATTR processReceivedBit(uint8_t bit){
                 receiverProgress = PROG_SYNC;
             }
             break;
+
         case RX_SYNC:
             syncValue = (uint8_t)((syncValue << 1) | bit);
             if (++syncCount == 8){
@@ -361,82 +441,50 @@ static void PROTOCOL_ISR_ATTR processReceivedBit(uint8_t bit){
                     resetReceiver();
                     return;
                 }
-                rxState = RX_HEADER;
-                receiverProgress = PROG_HEADER;
-            }
-            break;
-        case RX_HEADER: {
-            uint8_t index = headerBitCount / 8;
-            if ((headerBitCount % 8) == 0){
-                receivedHeader[index] = 0;
-            }
-            receivedHeader[index] = (uint8_t)((receivedHeader[index] << 1) | bit);
-            if (++headerBitCount == 56){
-                // Keep collecting immediately; header ECC runs in the main loop.
                 rxState = RX_DATA;
                 receiverProgress = PROG_DATA;
             }
             break;
-    }
-    case RX_DATA:
-        if (rxWireBytes >= MAX_WIRE_BYTES){
+
+        case RX_DATA:
+            incomingByte = (uint8_t)((incomingByte << 1) | bit);
+            if (++incomingBits == 8){
+                rxWire[rxWireBytes++] = incomingByte;
+                incomingByte = incomingBits = 0;
+
+                if (rxWireBytes == PROTOCOL_FRAME_BYTES){
+                    rxState = RX_READY;
+                    receiverProgress = PROG_READY;
+                }
+            }
             break;
-        }
-        incomingByte = (uint8_t)((incomingByte << 1) | bit);
-        if (++incomingBits == 8){
-            rxWire[rxWireBytes] = incomingByte;
-            rxWireBytes++; // Publish only complete bytes.
-            incomingByte = incomingBits = 0;
-        }
-        break;
-    default:
-        break;
+
+        default:
+            break;
     }
 }
 #endif
 
 void protocolInit(void){
-    rsInit();
 #ifdef SENDER
     txState = TX_IDLE;
     inTransmission = false;
     txBitIndex = 0;
 #else
     previousSample = 0;
+    resetRequested = false;
     resetReceiver();
 #endif
 }
 
-// Reject invalid requests or a request made while another message is sending.
-// Build the header and split the message into groups of six bytes.
-// Fill unused bytes of the final group with zeros. The header length tells
-// the receiver which bytes are real data. Start sending only when ready.
+// The desktop supplies the already encoded frame. No packet/ECC work here.
 bool protocolTransmit(const uint8_t *data, uint16_t length){
 #ifdef SENDER
-    if (inTransmission || data == NULL || length == 0 ||
-        length > PROTOCOL_MAX_MESSAGE_BYTES)
+    if (inTransmission || data == NULL || length != PROTOCOL_FRAME_BYTES){
         return false;
-
-    uint32_t header = ((uint32_t)START_PATTERN << 20) |
-                      ((uint32_t)length << 4) | END_PATTERN;
-    uint8_t rawHeader[3] = {
-        (uint8_t)(header >> 16), (uint8_t)(header >> 8), (uint8_t)header
-    };
-    rsEncode(rawHeader, 3, encodedHeader);
-    txWireLength = 0;
-    for (uint16_t offset = 0; offset < length; offset += 6){
-        uint8_t payload[6] = {0};
-        uint16_t remaining = length - offset;
-        uint8_t count = remaining > 6 ? 6 : (uint8_t)remaining;
-        memcpy(payload, data + offset, count);
-        uint8_t *packet = txWire + txWireLength;
-        packet[0] = 0xAA;
-        packet[1] = 0xD3;
-        rsEncode(payload, 6, packet + 2);
-        packet[12] = 0x55;
-        packet[13] = 0x2C;
-        txWireLength += PROTOCOL_PACKET_BYTES;
     }
+
+    memcpy(txWire, data, length);
     txBitIndex = 0;
     txState = TX_PREAMBLE;
     inTransmission = true;
@@ -448,16 +496,14 @@ bool protocolTransmit(const uint8_t *data, uint16_t length){
 #endif
 }
 
-// Send one bit whenever the sender timer fires. The current state chooses
-// the start pattern, D3, header, or packet data. Reset the bit counter when
-// changing stages. After the final bit has had its full interval, set the
-// output LOW and mark the sender as available for the next message.
 void PROTOCOL_ISR_ATTR protocolTransmitTick(void){
 #ifdef SENDER
     if (!inTransmission){
         return;
     }
+
     uint8_t bit = 0;
+
     switch (txState){
         case TX_PREAMBLE:
             bit = (PREAMBLE >> (15 - txBitIndex)) & 1;
@@ -465,13 +511,8 @@ void PROTOCOL_ISR_ATTR protocolTransmitTick(void){
         case TX_SYNC:
             bit = (SYNCWORD >> (7 - txBitIndex)) & 1;
             break;
-        case TX_HEADER:
-            bit = (encodedHeader[txBitIndex / 8] >>
-                   (7 - txBitIndex % 8)) & 1;
-            break;
         case TX_DATA:
-            bit = (txWire[txBitIndex / 8] >>
-                   (7 - txBitIndex % 8)) & 1;
+            bit = (txWire[txBitIndex / 8] >> (7 - txBitIndex % 8)) & 1;
             break;
         case TX_FINISH:
             transmitBit(Low);
@@ -481,35 +522,28 @@ void PROTOCOL_ISR_ATTR protocolTransmitTick(void){
         default:
             return;
     }
+
     transmitBit(bit ? High : Low);
     txBitIndex++;
+
     if (txState == TX_PREAMBLE && txBitIndex == 16){
         txBitIndex = 0;
-    txState = TX_SYNC;
+        txState = TX_SYNC;
     }
     else if (txState == TX_SYNC && txBitIndex == 8){
         txBitIndex = 0;
-    txState = TX_HEADER;
+        txState = TX_DATA;
     }
-    else if (txState == TX_HEADER && txBitIndex == 56){
-        txBitIndex = 0;
-    txState = TX_DATA;
-    }
-    else if (txState == TX_DATA && txBitIndex == txWireLength * 8){
-        txBitIndex = 0;
-    txState = TX_FINISH;
+    else if (txState == TX_DATA && txBitIndex == PROTOCOL_FRAME_BYTES * 8){
+        txState = TX_FINISH;
     }
 #endif
 }
 
-// Read the input four times per transmitted bit. A LOW-to-HIGH change
-// starts the timing count. For each bit, use the next three readings:
-// two or more HIGH readings mean 1; otherwise the bit is 0.
-// The fourth reading finishes that bit interval without adding a vote.
-// Stop collecting once the message is ready, until the application resets.
 void PROTOCOL_ISR_ATTR protocolReceiveTick(bool sample){
 #ifdef RECEIVER
     uint8_t current = sample ? 1 : 0;
+
     if (resetRequested){
         resetReceiver();
         resetRequested = false;
@@ -529,78 +563,25 @@ void PROTOCOL_ISR_ATTR protocolReceiveTick(bool sample){
         previousSample = current;
         return;
     }
+
     samplePhase++;
-    if (samplePhase <= 3 && current)
+    if (samplePhase <= 3 && current){
         highSampleCount++;
-    if (samplePhase == 3)
+    }
+    if (samplePhase == 3){
         processReceivedBit(highSampleCount >= 2);
-    if (samplePhase >= 4)
+    }
+    if (samplePhase >= 4){
         samplePhase = highSampleCount = 0;
+    }
     previousSample = current;
 #else
     (void)sample;
 #endif
 }
 
-// Run from the main loop. Repair and check collected bytes while the timer
-// continues receiving later bytes. The timer does not rewrite completed bytes
-// until reception is reset.
 void protocolProcess(void){
-#ifdef RECEIVER
-    if (resetRequested || rxState != RX_DATA)
-        return;
-
-    // Repair the header, check its markers, and reject an invalid length.
-    if (!headerDecoded){
-        uint8_t codeword[HEADER_BYTES];
-        for (uint8_t i = 0; i < HEADER_BYTES; i++) codeword[i] = receivedHeader[i];
-        int8_t result = rsDecode(codeword, HEADER_BYTES);
-        uint32_t header = ((uint32_t)codeword[0] << 16) |
-                          ((uint32_t)codeword[1] << 8) | codeword[2];
-        uint16_t length = (header >> 4) & 0xFFFFU;
-        if (result < 0 || (header >> 20) != START_PATTERN ||
-            (header & 0xFU) != END_PATTERN || length == 0 ||
-            length > PROTOCOL_MAX_MESSAGE_BYTES){
-            protocolResetReceiver();
-            return;
-        }
-        receivedLength = length;
-        correctedSymbols = result;
-        headerDecoded = true;
-    }
-    // Round the length up to groups of six and wait for each full packet.
-    // Check packet markers, repair its data, and append it to the message.
-    // Ignore padding in the final packet. A failed check discards this frame.
-    uint16_t expectedPackets = (receivedLength + 5) / 6;
-    while (decodedPackets < expectedPackets &&
-           rxWireBytes >= (decodedPackets + 1) * PROTOCOL_PACKET_BYTES){
-        uint16_t offset = decodedPackets * PROTOCOL_PACKET_BYTES;
-        if (rxWire[offset] != 0xAA || rxWire[offset + 1] != 0xD3 ||
-            rxWire[offset + 12U] != 0x55 || rxWire[offset + 13] != 0x2C){
-            protocolResetReceiver();
-            return;
-        }
-        uint8_t codeword[DATA_CODEWORD_BYTES];
-        for (uint8_t i = 0; i < DATA_CODEWORD_BYTES; i++)
-            codeword[i] = rxWire[offset + 2 + i];
-        int8_t result = rsDecode(codeword, DATA_CODEWORD_BYTES);
-        if (result < 0){
-            protocolResetReceiver();
-            return;
-        }
-        correctedSymbols += result;
-        uint16_t remaining = receivedLength - messageBytes;
-        uint8_t count = remaining > 6 ? 6 : (uint8_t)remaining;
-        memcpy(rxMessage + messageBytes, codeword, count);
-        messageBytes += count;
-        decodedPackets++;
-    }
-    // All packets passed: make the completed message available to the caller.
-    if (decodedPackets == expectedPackets){
-        rxState = RX_READY;
-        receiverProgress = PROG_READY;
-    }
-#endif
+    // Decoding now runs in Desktop/main.cpp through protocolDecode().
 }
 
 bool protocolIsReady(void){
@@ -611,7 +592,6 @@ bool protocolIsReady(void){
 #endif
 }
 
-
 bool protocolIsTransmitting(void){
 #ifdef SENDER
     return inTransmission;
@@ -620,36 +600,27 @@ bool protocolIsTransmitting(void){
 #endif
 }
 
-
-// Return the internal message buffer. Copy it before requesting a reset.
 const uint8_t *protocolGetMessageData(void){
 #ifdef RECEIVER
-    return rxMessage;
+    return rxWire;
 #else
     return NULL;
 #endif
 }
 
-
 uint16_t protocolGetMessageLength(void){
 #ifdef RECEIVER
-    return receivedLength;
+    return protocolIsReady() ? PROTOCOL_FRAME_BYTES : 0;
 #else
     return 0;
 #endif
 }
-
 
 int16_t protocolGetCorrectedSymbolCount(void){
-#ifdef RECEIVER
-    return correctedSymbols;
-#else
+    // The MCU never corrects symbols; the desktop reports this count.
     return 0;
-#endif
 }
 
-
-// Progress: 0 waiting, 1 start pattern, 2 sync, 3 header, 4 data, 5 ready.
 enum ReceiveProgress protocolGetReceiverProgress(void){
 #ifdef RECEIVER
     return resetRequested ? PROG_WAITING : receiverProgress;
@@ -658,11 +629,10 @@ enum ReceiveProgress protocolGetReceiverProgress(void){
 #endif
 }
 
-
-// Ask the timer interrupt to reset on its next reading. This avoids
-// clearing collection state while the interrupt is working on a bit.
 void protocolResetReceiver(void){
 #ifdef RECEIVER
     resetRequested = true;
 #endif
 }
+
+#endif
