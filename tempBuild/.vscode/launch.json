@@ -12,9 +12,9 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug",
-            "executable": "C:/Personal/Projects/firmware/tempBuild/.pio/build/esp32_receiver/firmware.elf",
+            "executable": "C:/Users/hanis/OneDrive/Desktop/Personal/Projects/firmware/tempBuild/.pio/build/esp32_receiver/firmware.elf",
             "projectEnvName": "esp32_receiver",
-            "toolchainBinDir": "C:/Users/Hanish/.platformio/packages/toolchain-xtensa-esp32/bin",
+            "toolchainBinDir": "C:/Users/hanis/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "preLaunchTask": {
                 "type": "PlatformIO",
@@ -25,18 +25,18 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (skip Pre-Debug)",
-            "executable": "C:/Personal/Projects/firmware/tempBuild/.pio/build/esp32_receiver/firmware.elf",
+            "executable": "C:/Users/hanis/OneDrive/Desktop/Personal/Projects/firmware/tempBuild/.pio/build/esp32_receiver/firmware.elf",
             "projectEnvName": "esp32_receiver",
-            "toolchainBinDir": "C:/Users/Hanish/.platformio/packages/toolchain-xtensa-esp32/bin",
+            "toolchainBinDir": "C:/Users/hanis/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart"
         },
         {
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (without uploading)",
-            "executable": "C:/Personal/Projects/firmware/tempBuild/.pio/build/esp32_receiver/firmware.elf",
+            "executable": "C:/Users/hanis/OneDrive/Desktop/Personal/Projects/firmware/tempBuild/.pio/build/esp32_receiver/firmware.elf",
             "projectEnvName": "esp32_receiver",
-            "toolchainBinDir": "C:/Users/Hanish/.platformio/packages/toolchain-xtensa-esp32/bin",
+            "toolchainBinDir": "C:/Users/hanis/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "loadMode": "manual"
         }
