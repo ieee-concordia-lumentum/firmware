@@ -17,7 +17,7 @@ static constexpr uint16_t MAX_DESKTOP_PAYLOAD_BYTES =
 // Build from the project directory:
 // g++ -std=c++11 -DDESKTOP -Iinclude src/Desktop/main.cpp src/protocol.c -o .pio/desktop.exe
 // Start receiving first: .pio/desktop.exe toReceive COM4
-// Then send .txt files:  .pio/desktop.exe toTransmit COM3
+// Then send .txt/.png/.jpg/.jpeg files:  .pio/desktop.exe toTransmit COM3
 
 static uint32_t messageChecksum(const uint8_t *data, size_t length)
 {
@@ -358,11 +358,20 @@ static void updateFileChecksum(uint32_t *checksum, const uint8_t *data, size_t l
     }
 }
 
-static bool validTextFileName(const char *name)
+static bool supportedFileExtension(const char *name)
+{
+    const char *extension = strrchr(name, '.');
+    return extension != NULL &&
+           (lstrcmpiA(extension, ".txt") == 0 ||
+            lstrcmpiA(extension, ".png") == 0 ||
+            lstrcmpiA(extension, ".jpg") == 0 ||
+            lstrcmpiA(extension, ".jpeg") == 0);
+}
+static bool validFileName(const char *name)
 {
     const size_t length = strlen(name);
     if (length < 5 || length > FILE_DATA_BYTES ||
-        _stricmp(name + length - 4, ".txt") != 0 || name[0] == '.')
+        !supportedFileExtension(name) || name[0] == '.')
     {
         return false;
     }
@@ -374,14 +383,15 @@ static bool validTextFileName(const char *name)
             return false;
         }
     }
-    // Windows device names remain reserved even with a .txt extension.
+    // Windows device names remain reserved even with a file extension.
     char base[FILE_DATA_BYTES + 1U];
     strcpy(base, name);
     *strchr(base, '.') = '\0';
-    if (_stricmp(base, "CON") == 0 || _stricmp(base, "PRN") == 0 ||
-        _stricmp(base, "AUX") == 0 || _stricmp(base, "NUL") == 0 ||
-        ((_strnicmp(base, "COM", 3) == 0 || _strnicmp(base, "LPT", 3) == 0) &&
-         strlen(base) == 4 && base[3] >= '1' && base[3] <= '9'))
+    if (lstrcmpiA(base, "CON") == 0 || lstrcmpiA(base, "PRN") == 0 ||
+        lstrcmpiA(base, "AUX") == 0 || lstrcmpiA(base, "NUL") == 0 ||
+        (strlen(base) == 4 && base[3] >= '1' && base[3] <= '9' &&
+         (lstrcmpiA(std::string(base, 3).c_str(), "COM") == 0 ||
+          lstrcmpiA(std::string(base, 3).c_str(), "LPT") == 0)))
     {
         return false;
     }
@@ -398,9 +408,9 @@ static void makeFileHeader(uint8_t *message, uint8_t type, uint32_t id, uint32_t
 
 static bool transmitFile(HANDLE port, const char *name, uint32_t id)
 {
-    if (!validTextFileName(name))
+    if (!validFileName(name))
     {
-        fprintf(stderr, "Unsupported text filename: %s\n", name);
+        fprintf(stderr, "Unsupported filename: %s\n", name);
         return false;
     }
     char path[MAX_PATH];
@@ -454,7 +464,7 @@ static bool transmitFile(HANDLE port, const char *name, uint32_t id)
     return success;
 }
 
-static bool transmitTextFiles(HANDLE port)
+static bool transmitFiles(HANDLE port)
 {
     WIN32_FIND_DATAA entry;
     HANDLE search = FindFirstFileA("toTransmit\\*", &entry);
@@ -466,9 +476,8 @@ static bool transmitTextFiles(HANDLE port)
     std::vector<std::string> names;
     do
     {
-        const size_t length = strlen(entry.cFileName);
-        if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && length >= 4 &&
-            _stricmp(entry.cFileName + length - 4, ".txt") == 0)
+        if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            supportedFileExtension(entry.cFileName))
         {
             names.push_back(entry.cFileName);
         }
@@ -488,7 +497,7 @@ static bool transmitTextFiles(HANDLE port)
             return false;
         }
     }
-    printf("Finished sending %u text files. Check the receiver for delivery.\n",
+    printf("Finished sending %u files. Check the receiver for delivery.\n",
            static_cast<unsigned>(names.size()));
     return true;
 }
@@ -544,7 +553,7 @@ static bool receiveFileMessage(FileReception *state, const uint8_t *message, uin
         }
         memcpy(name, data, dataLength);
         name[dataLength] = '\0';
-        if (!validTextFileName(name))
+        if (!validFileName(name))
         {
             fprintf(stderr, "Rejected invalid filename.\n");
             return false;
@@ -717,7 +726,7 @@ int main(int argc, char *argv[])
     }
     else if (success)
     {
-        success = transmitTextFiles(port);
+        success = transmitFiles(port);
     }
 
     CloseHandle(port);
