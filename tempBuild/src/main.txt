@@ -1,3 +1,6 @@
+// Keep the earlier Arduino link test for reference. It sends a repeated test
+// message or prints received data and is outside the current firmware builds.
+
 #include <Arduino.h>
 #include "hardware.h"
 #include "protocol.h"

@@ -9,9 +9,11 @@
 #define PROTOCOL_ISR_ATTR
 #endif
 
-#define PROTOCOL_SPEED_KBPS        16U
+#define PROTOCOL_SPEED_KBPS        32U
+#define PROTOCOL_USB_BAUD          460800UL
 #define PROTOCOL_PACKET_BYTES      14U
-#define PROTOCOL_MAX_MESSAGE_BYTES 256U
+#define PROTOCOL_MAX_MESSAGE_BYTES 512U
+#define PROTOCOL_FRAME_BYTES       (7U + ((PROTOCOL_MAX_MESSAGE_BYTES + 5U) / 6U) * PROTOCOL_PACKET_BYTES)
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,6 +39,15 @@ extern "C" {
     int16_t protocolGetCorrectedSymbolCount(void);
     enum ReceiveProgress protocolGetReceiverProgress(void);
     void protocolResetReceiver(void);
+
+#ifdef DESKTOP
+    const char *protocolDecodeFailure(void);
+    uint16_t protocolDecodeFailureOffset(void);
+    // Packet construction and ECC run only on the computer.
+    bool protocolEncode(const uint8_t *data, uint16_t length, uint8_t *frame);
+    bool protocolDecode(const uint8_t *frame, uint16_t frameLength,
+                        uint8_t *message, uint16_t *length, int16_t *correctedSymbols);
+#endif
 #ifdef __cplusplus
 }
 #endif

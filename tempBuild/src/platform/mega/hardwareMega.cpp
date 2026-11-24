@@ -1,3 +1,6 @@
+// Set up Timer1 and the output pins for the older Arduino Mega sender.
+// The current ESP32 build configurations do not include this file.
+
 #include <Arduino.h>
 #include "hardware.h"
 #include "protocol.h"
