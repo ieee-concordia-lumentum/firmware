@@ -1,3 +1,6 @@
+// Build and decode error-corrected frames on the desktop. In timer firmware,
+// turn those frames into bits on the sender and recover bytes on the receiver.
+
 #include "protocol.h"
 #include "hardware.h"
 #include <string.h>
@@ -319,8 +322,15 @@ bool protocolEncode(const uint8_t *data, uint16_t length, uint8_t *frame){
     return true;
 }
 
+static const char *decodeFailure = "none";
+static uint16_t decodeFailureOffset = 0;
+const char *protocolDecodeFailure(void){ return decodeFailure; }
+uint16_t protocolDecodeFailureOffset(void){ return decodeFailureOffset; }
+
 bool protocolDecode(const uint8_t *frame, uint16_t frameLength,
                     uint8_t *message, uint16_t *length, int16_t *correctedSymbols){
+    decodeFailure = "invalid_arguments";
+    decodeFailureOffset = 0;
     if (frame == NULL || frameLength != PROTOCOL_FRAME_BYTES ||
         message == NULL || length == NULL || correctedSymbols == NULL){
         return false;
@@ -336,6 +346,7 @@ bool protocolDecode(const uint8_t *frame, uint16_t frameLength,
                       ((uint32_t)codeword[1] << 8) | codeword[2];
     uint16_t messageLength = (header >> 4) & 0xFFFFU;
 
+    decodeFailure = result < 0 ? "header_ecc" : "header_marker_or_length";
     if (result < 0 || (header >> 20) != START_PATTERN ||
         (header & 0xFU) != END_PATTERN || messageLength == 0 ||
         messageLength > PROTOCOL_MAX_MESSAGE_BYTES){
@@ -347,6 +358,8 @@ bool protocolDecode(const uint8_t *frame, uint16_t frameLength,
 
     for (uint16_t offset = HEADER_BYTES; messageBytes < messageLength;
          offset += PROTOCOL_PACKET_BYTES){
+        decodeFailureOffset = offset;
+        decodeFailure = "data_marker";
         const uint8_t *packet = frame + offset;
 
         if (packet[0] != 0xAA || packet[1] != 0xD3 ||
@@ -358,6 +371,7 @@ bool protocolDecode(const uint8_t *frame, uint16_t frameLength,
         result = rsDecode(codeword, DATA_CODEWORD_BYTES);
 
         if (result < 0){
+            decodeFailure = "data_ecc";
             return false;
         }
 
@@ -370,6 +384,8 @@ bool protocolDecode(const uint8_t *frame, uint16_t frameLength,
 
     *length = messageLength;
     *correctedSymbols = corrections;
+    decodeFailure = "none";
+    decodeFailureOffset = 0;
     return true;
 }
 

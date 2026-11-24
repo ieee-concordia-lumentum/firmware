@@ -1,3 +1,6 @@
+// Try listing the contents of the current directory. This is a standalone
+// test and is separate from the file transfer program.
+
 #include <stdio.h>
 #include <dirent.h>
 

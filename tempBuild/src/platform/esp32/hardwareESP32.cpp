@@ -1,3 +1,6 @@
+// Set up pins and the hardware timer for the ESP32 timer-based link. Timer
+// interrupts drive the sender output or sample the receiver input.
+
 #include <Arduino.h>
 #include <driver/gpio.h>
 
@@ -34,7 +37,7 @@ void ARDUINO_ISR_ATTR onTimer(){
 
 extern "C"{
     void hardwareInit(void){
-        Serial.begin(115200);
+        // setup() owns serial initialization and its RX buffer size.
         delay(500);
 
 #ifdef SENDER
@@ -62,14 +65,11 @@ extern "C"{
 
 #ifdef SENDER
         timerAlarmWrite(transmissionTimer, senderAlarmTicks, true);
-        Serial.print("Sender timer base frequency: ");
 
 #elif defined(RECEIVER)
         timerAlarmWrite(transmissionTimer, receiverAlarmTicks, true);
-        Serial.print("Receiver timer base frequency: ");
 #endif
 
-        Serial.println(80000000UL / timerDivider);
         timerAlarmEnable(transmissionTimer);
     }
 

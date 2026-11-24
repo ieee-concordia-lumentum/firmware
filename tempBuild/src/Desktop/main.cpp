@@ -1,5 +1,8 @@
+// Run the Windows sender or receiver. Read files from toTransmit, or rebuild them
+// in toReceive and save them after the final checksum passes.
+
 #define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include <Windows.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -10,14 +13,57 @@
 
 #include "protocol.h"
 
+// Receiver re-arms after queueing the frame. Loading the next USB frame
+// already provides an inter-frame gap, so no additional desktop sleep is needed.
+static constexpr DWORD INTER_PACKET_DELAY_MS = 0UL;
+
 static constexpr uint16_t CRC_TRAILER_BYTES = 9U;
 static constexpr uint16_t MAX_DESKTOP_PAYLOAD_BYTES =
     PROTOCOL_MAX_MESSAGE_BYTES - CRC_TRAILER_BYTES;
 
 // Build from the project directory:
 // g++ -std=c++11 -DDESKTOP -Iinclude src/Desktop/main.cpp src/protocol.c -o .pio/desktop.exe
-// Start receiving first: .pio/desktop.exe toReceive COM4
-// Then send .txt/.png/.jpg/.jpeg files:  .pio/desktop.exe toTransmit COM3
+// Start receiving first: .pio/desktop.exe toReceive COM7
+// Then send text, images, or videos:  .pio/desktop.exe toTransmit COM3
+
+static bool progressVisible = false;
+static DWORD lastProgressUpdate = 0;
+
+static void endProgress(void)
+{
+    if (progressVisible) { putchar('\n'); fflush(stdout); progressVisible = false; }
+    lastProgressUpdate = 0;
+}
+
+// Show local sender progress or confirmed receiver progress.
+static void showProgress(const char *role, uint32_t bytes, uint32_t total,
+                         DWORD started, bool complete = false, bool force = false)
+{
+    const DWORD now = GetTickCount();
+    if (!force && lastProgressUpdate && now - lastProgressUpdate < 250UL) return;
+    lastProgressUpdate = now;
+    unsigned percent = total ? static_cast<unsigned>(100ULL * bytes / total) : 0U;
+    // 100% is reserved for the final local completion or receiver CRC/save check.
+    if (!complete && percent >= 100U) percent = 99U;
+    if (complete) percent = 100U;
+    char bar[21];
+    for (unsigned i = 0; i < 20; ++i) bar[i] = i < percent / 5U ? '#' : '.';
+    bar[20] = '\0';
+    const DWORD elapsed = now - started;
+    const double speed = elapsed ? bytes * 1000.0 / elapsed : 0.0;
+    const unsigned long remaining = speed > 0 && bytes < total ?
+        static_cast<unsigned long>((total - bytes) / speed) : 0UL;
+    if (speed > 0 || complete)
+        printf("\r%s [%s] %3u%% | %.1f / %.1f KB | %.2f KB/s | ETA %lum %02lus       ",
+               role, bar, percent, bytes / 1000.0, total / 1000.0, speed / 1000.0,
+               remaining / 60UL, remaining % 60UL);
+    else
+        printf("\r%s [%s] %3u%% | %.1f / %.1f KB | measuring speed...                 ",
+               role, bar, percent, bytes / 1000.0, total / 1000.0);
+    fflush(stdout);
+    progressVisible = true;
+    if (complete) endProgress();
+}
 
 static uint32_t messageChecksum(const uint8_t *data, size_t length)
 {
@@ -100,7 +146,7 @@ static HANDLE openSerialPort(const char *portName)
         return INVALID_HANDLE_VALUE;
     }
 
-    settings.BaudRate = 115200;
+    settings.BaudRate = PROTOCOL_USB_BAUD;
     settings.ByteSize = 8;
     settings.Parity = NOPARITY;
     settings.StopBits = ONESTOPBIT;
@@ -218,6 +264,8 @@ static bool readSerialLine(HANDLE port, char *line, size_t capacity, DWORD timeo
     return false;
 }
 
+static bool senderPipeline = false;
+
 static bool connectDesktop(HANDLE port, const char *role)
 {
     const uint8_t command[] = "INFO\n";
@@ -241,6 +289,10 @@ static bool connectDesktop(HANDLE port, const char *role)
             {
                 break;
             }
+            if (strcmp(reply, "CAP,PIPELINE") == 0 ||
+                (strncmp(reply, "DIAG,LINK,transport=uart,", 25) == 0 &&
+                 strstr(reply, ",pipeline=1") != NULL))
+                senderPipeline = true;
             if (strcmp(reply, expected) == 0)
             {
                 return true;
@@ -252,7 +304,8 @@ static bool connectDesktop(HANDLE port, const char *role)
     return false;
 }
 
-static bool toTransmit(HANDLE port, const uint8_t *payload, uint16_t payloadLength)
+// Submit one encoded frame. Pipeline mode waits for acceptance until the last frame.
+static bool toTransmit(HANDLE port, const uint8_t *payload, uint16_t payloadLength, bool waitForDone = false)
 {
     if (payloadLength > MAX_DESKTOP_PAYLOAD_BYTES)
     {
@@ -292,20 +345,23 @@ static bool toTransmit(HANDLE port, const uint8_t *payload, uint16_t payloadLeng
     bool accepted = false;
     char reply[128];
 
-    while (GetTickCount() - started < 5000UL)
+    while (GetTickCount() - started < 7000UL)
     {
         if (!readSerialLine(port, reply, sizeof(reply), 1000UL))
         {
-            break;
+            continue;
         }
         if (strncmp(reply, "ERR,", 4) == 0)
         {
+            endProgress();
             fprintf(stderr, "%s\n", reply);
             return false;
         }
         if (sscanf(reply, "TX_ACCEPTED,%lu", &transmissionId) == 1)
         {
             accepted = true;
+            if (senderPipeline && !waitForDone)
+                return true;
         }
 
         unsigned long completedId = 0;
@@ -313,14 +369,13 @@ static bool toTransmit(HANDLE port, const uint8_t *payload, uint16_t payloadLeng
         if (accepted && sscanf(reply, "TX_DONE,%lu", &completedId) == 1 &&
             completedId == transmissionId)
         {
-            printf("Transmitted %u bytes.\n", static_cast<unsigned>(payloadLength));
-            // Allow the receiver to forward its captured frame before the next send.
-            // This is local pacing, not a remote delivery acknowledgment.
-            Sleep(200);
+            // No remote acknowledgment: this only confirms local optical output.
+            if (INTER_PACKET_DELAY_MS != 0) Sleep(INTER_PACKET_DELAY_MS);
             return true;
         }
     }
 
+    endProgress();
     fprintf(stderr, "Transmission timed out.\n");
     return false;
 }
@@ -365,12 +420,23 @@ static bool supportedFileExtension(const char *name)
            (lstrcmpiA(extension, ".txt") == 0 ||
             lstrcmpiA(extension, ".png") == 0 ||
             lstrcmpiA(extension, ".jpg") == 0 ||
-            lstrcmpiA(extension, ".jpeg") == 0);
+            lstrcmpiA(extension, ".jpeg") == 0 ||
+            lstrcmpiA(extension, ".mp4") == 0 ||
+            lstrcmpiA(extension, ".mov") == 0 ||
+            lstrcmpiA(extension, ".avi") == 0 ||
+            lstrcmpiA(extension, ".mkv") == 0 ||
+            lstrcmpiA(extension, ".webm") == 0 ||
+            lstrcmpiA(extension, ".m4v") == 0 ||
+            lstrcmpiA(extension, ".wmv") == 0 ||
+            lstrcmpiA(extension, ".mpg") == 0 ||
+            lstrcmpiA(extension, ".mpeg") == 0 ||
+            lstrcmpiA(extension, ".3gp") == 0);
 }
 static bool validFileName(const char *name)
 {
     const size_t length = strlen(name);
     if (length < 5 || length > FILE_DATA_BYTES ||
+        length > MAX_PATH - sizeof("toTransmit\\") ||
         !supportedFileExtension(name) || name[0] == '.')
     {
         return false;
@@ -430,10 +496,13 @@ static bool transmitFile(HANDLE port, const char *name, uint32_t id)
         return false;
     }
     const uint32_t length = static_cast<uint32_t>(size.QuadPart);
+    const DWORD fileStarted = GetTickCount();
     uint8_t message[MAX_DESKTOP_PAYLOAD_BYTES];
     makeFileHeader(message, 'B', id, length);
     memcpy(message + FILE_HEADER_BYTES, name, strlen(name));
+    endProgress();
     printf("Sending %s (%lu bytes).\n", name, static_cast<unsigned long>(length));
+    showProgress("Sending", 0, length, fileStarted, false, true);
     bool success = toTransmit(port, message, FILE_HEADER_BYTES + strlen(name));
     uint32_t offset = 0;
     uint32_t checksum = 0xFFFFFFFFU;
@@ -452,15 +521,23 @@ static bool transmitFile(HANDLE port, const char *name, uint32_t id)
         makeFileHeader(message, 'D', id, offset);
         updateFileChecksum(&checksum, message + FILE_HEADER_BYTES, received);
         success = toTransmit(port, message, FILE_HEADER_BYTES + received);
-        offset += received;
+        if (success) {
+            offset += received;
+            showProgress(senderPipeline ? "Queued locally" : "Sending", offset, length, fileStarted);
+        }
     }
     CloseHandle(file);
     if (success)
     {
         makeFileHeader(message, 'E', id, length);
         storeFileNumber(message + FILE_HEADER_BYTES, ~checksum);
-        success = toTransmit(port, message, FILE_HEADER_BYTES + 4U);
+        success = toTransmit(port, message, FILE_HEADER_BYTES + 4U, true);
     }
+    if (success) showProgress("Sent locally", length, length, fileStarted, true, true);
+    else endProgress();
+    const DWORD elapsed = GetTickCount() - fileStarted;
+    printf("%s: %.1f seconds, %.0f bytes/sec (local transmission%s).\n", name,
+           elapsed / 1000.0, elapsed ? offset * 1000.0 / elapsed : 0.0, success ? " finished" : " failed");
     return success;
 }
 
@@ -511,6 +588,7 @@ struct FileReception
     uint32_t length = 0;
     uint32_t offset = 0;
     uint32_t checksum = 0xFFFFFFFFU;
+    DWORD started = 0;
 
     void discard()
     {
@@ -532,6 +610,7 @@ struct FileReception
     }
 };
 
+// Apply start, data, and end frames. Publish the file only after its CRC matches.
 static bool receiveFileMessage(FileReception *state, const uint8_t *message, uint16_t length)
 {
     if (length < FILE_HEADER_BYTES || memcmp(message, "FT01", 4) != 0)
@@ -545,6 +624,7 @@ static bool receiveFileMessage(FileReception *state, const uint8_t *message, uin
     const uint16_t dataLength = length - FILE_HEADER_BYTES;
     if (message[4] == 'B')
     {
+        endProgress();
         state->discard();
         char name[FILE_DATA_BYTES + 1U];
         if (dataLength == 0 || dataLength > FILE_DATA_BYTES || memchr(data, 0, dataLength))
@@ -576,11 +656,13 @@ static bool receiveFileMessage(FileReception *state, const uint8_t *message, uin
             state->discard();
             return false;
         }
+        state->started = GetTickCount();
         state->id = id;
         state->length = offset;
         state->offset = 0;
         state->checksum = 0xFFFFFFFFU;
         printf("Receiving %s (%lu bytes).\n", name, static_cast<unsigned long>(offset));
+        showProgress("Receiving", 0, state->length, state->started, false, true);
         return true;
     }
     if (state->file == INVALID_HANDLE_VALUE)
@@ -597,6 +679,7 @@ static bool receiveFileMessage(FileReception *state, const uint8_t *message, uin
         {
             state->offset += dataLength;
             updateFileChecksum(&state->checksum, data, dataLength);
+            showProgress("Receiving", state->offset, state->length, state->started);
             return true;
         }
     }
@@ -611,12 +694,14 @@ static bool receiveFileMessage(FileReception *state, const uint8_t *message, uin
             if (success && MoveFileExA(state->temporary, state->destination, 0))
             {
                 state->temporary[0] = '\0';
+                showProgress("Received CRC OK", state->length, state->length, state->started, true, true);
                 printf("Saved %s (%lu bytes), CRC OK.\n", state->destination,
                        static_cast<unsigned long>(state->length));
                 return true;
             }
         }
     }
+    endProgress();
     fprintf(stderr, "File incomplete, out of order, or could not be saved. Retry the file.\n");
     state->discard();
     return false;
@@ -625,7 +710,7 @@ static bool receiveFileMessage(FileReception *state, const uint8_t *message, uin
 static bool toReceive(HANDLE port)
 {
     FileReception file;
-    char header[128];
+    char header[256];
     printf("Listening. Start the sender now. Ctrl+C stops receiving.\n");
 
     while (readSerialLine(port, header, sizeof(header), 0))
@@ -662,7 +747,9 @@ static bool toReceive(HANDLE port)
 
         if (!protocolDecode(frame, sizeof(frame), message, &messageLength, &correctedSymbols))
         {
-            fprintf(stderr, "Message %lu rejected: invalid packet or uncorrectable ECC.\n", messageNumber);
+            endProgress();
+            fprintf(stderr, "Message %lu rejected: %s at frame byte %u.\n", messageNumber,
+                    protocolDecodeFailure(), static_cast<unsigned>(protocolDecodeFailureOffset()));
             continue;
         }
 
@@ -673,6 +760,7 @@ static bool toReceive(HANDLE port)
             !parseHex8(message + messageLength - 8U, &expectedChecksum) ||
             messageChecksum(message, messageLength - CRC_TRAILER_BYTES) != expectedChecksum)
         {
+            endProgress();
             fprintf(stderr, "Message %lu rejected: CRC mismatch.\n", messageNumber);
             continue;
         }
@@ -729,6 +817,7 @@ int main(int argc, char *argv[])
         success = transmitFiles(port);
     }
 
+    endProgress();
     CloseHandle(port);
     return success ? 0 : 1;
 }

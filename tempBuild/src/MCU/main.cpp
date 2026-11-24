@@ -1,3 +1,6 @@
+// Bridge USB serial and the one-way board link. The sender queues frames from the
+// desktop, and the receiver forwards incoming frames to the desktop.
+
 #include <Arduino.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,12 +9,15 @@
 
 #include "hardware.h"
 #include "protocol.h"
+#ifdef PROTOCOL_UART_TRANSPORT
+#include "uart_link.h"
+#endif
 
 // ============================================================
 // USB SERIAL SETTINGS
 // ============================================================
 
-static constexpr uint32_t USB_SERIAL_BAUD = 115200;
+static constexpr uint32_t USB_SERIAL_BAUD = PROTOCOL_USB_BAUD;
 
 // Physical frames contain bytes already encoded by the desktop.
 static constexpr unsigned long receptionTimeoutMs = 1000UL;
@@ -45,11 +51,18 @@ static unsigned long senderPayloadStarted = 0;
 
 // Transmission status
 static bool transmissionPending = false;
+#ifdef PROTOCOL_UART_TRANSPORT
+static bool frameQueued = false;
+static unsigned long transmissionFinishedUs = 0;
+#endif
 static uint32_t nextTransmissionId = 0;
 static uint32_t activeTransmissionId = 0;
 
 static void senderPrintReady(void)
 {
+#ifdef PROTOCOL_UART_TRANSPORT
+    Serial.print("CAP,PIPELINE\n");
+#endif
     Serial.printf(
         "READY,SENDER,%u\n",
         static_cast<unsigned>(MAX_DESKTOP_PAYLOAD_BYTES));
@@ -77,6 +90,14 @@ static void finishDesktopPayload(void)
         return;
     }
 
+#ifdef PROTOCOL_UART_TRANSPORT
+    if (payloadLength != PROTOCOL_FRAME_BYTES)
+    {
+        senderPrintError("INVALID_FRAME");
+        return;
+    }
+    frameQueued = true;
+#else
     if (transmissionPending || protocolIsTransmitting())
     {
         senderPrintError("BUSY");
@@ -103,6 +124,7 @@ static void finishDesktopPayload(void)
         "TX_ACCEPTED,%lu,%lu\n",
         static_cast<unsigned long>(activeTransmissionId),
         static_cast<unsigned long>(payloadLength));
+#endif
 }
 
 // Parse one ASCII command line.
@@ -163,7 +185,11 @@ static void processSender(void)
         senderPrintError("SERIAL_TIMEOUT");
     }
 
-    while (Serial.available() > 0)
+    while (
+#ifdef PROTOCOL_UART_TRANSPORT
+           !frameQueued &&
+#endif
+           Serial.available() > 0)
     {
         const int incoming = Serial.read();
 
@@ -246,7 +272,27 @@ static void processSender(void)
             static_cast<unsigned long>(activeTransmissionId));
 
         transmissionPending = false;
+#ifdef PROTOCOL_UART_TRANSPORT
+        transmissionFinishedUs = micros();
+#endif
     }
+#ifdef PROTOCOL_UART_TRANSPORT
+    // Give receiver USB forwarding headroom at the same nominal baud rate.
+    if (frameQueued && !transmissionPending && micros() - transmissionFinishedUs >= 20000UL)
+    {
+        frameQueued = false;
+        if (!protocolTransmit(senderPayload, PROTOCOL_FRAME_BYTES))
+        {
+            senderPrintError("INVALID_FRAME");
+            return;
+        }
+        if (++nextTransmissionId == 0) ++nextTransmissionId;
+        activeTransmissionId = nextTransmissionId;
+        transmissionPending = true;
+        Serial.printf("TX_ACCEPTED,%lu,%u\n",
+                      static_cast<unsigned long>(activeTransmissionId), PROTOCOL_FRAME_BYTES);
+    }
+#endif
 }
 
 #else
@@ -263,13 +309,11 @@ static void processSender(void)
 // ============================================================
 
 static bool receiving = false;
-static bool receiverForwarding = false;
 static unsigned long receptionStarted = 0;
 
 static uint32_t receivedMessages = 0;
-static uint32_t loggingDrops = 0;
 
-// The queue keeps USB logging from blocking the bit-reception timer.
+// The queue keeps USB output from blocking reception.
 static constexpr size_t SERIAL_TX_QUEUE_CAPACITY =
     2U * (static_cast<size_t>(PROTOCOL_FRAME_BYTES) + 96U);
 
@@ -358,7 +402,6 @@ static void queueReceivedMessage(
         static_cast<size_t>(headerLength) >= sizeof(header))
     {
 
-        loggingDrops++;
         return;
     }
 
@@ -371,7 +414,6 @@ static void queueReceivedMessage(
         SERIAL_TX_QUEUE_CAPACITY - serialTxCount)
     {
 
-        loggingDrops++;
         return;
     }
 
@@ -442,18 +484,6 @@ static void processReceiver(void)
 {
     processReceiverCommands();
 
-    // Keep the captured frame immutable until all queued USB bytes are sent.
-    if (receiverForwarding)
-    {
-        if (serialTxCount == 0)
-        {
-            protocolResetReceiver();
-            receiverForwarding = false;
-            receiving = false;
-        }
-        return;
-    }
-
     const enum ReceiveProgress progress = protocolGetReceiverProgress();
 
     if (progress == PROG_WAITING)
@@ -483,7 +513,9 @@ static void processReceiver(void)
         }
 
         queueReceivedMessage(protocolGetMessageData(), wireLength, ++receivedMessages);
-        receiverForwarding = true;
+        // queueReceivedMessage copied the bytes; capture can resume during USB output.
+        protocolResetReceiver();
+        receiving = false;
         return;
     }
 
@@ -502,6 +534,9 @@ static void processReceiver(void)
 
 void setup()
 {
+    // A complete desktop frame can arrive in one USB burst at high baud rates.
+    const size_t usbRxCapacity = 2U * PROTOCOL_FRAME_BYTES + 64U;
+    Serial.setRxBufferSize(usbRxCapacity);
     Serial.begin(USB_SERIAL_BAUD);
 
     // Preserve the initialization order required by your hardware timer.

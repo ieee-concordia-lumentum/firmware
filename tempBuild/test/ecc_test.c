@@ -135,6 +135,18 @@ static void testFrames(void) {
     protocolEncode(payload, 1, frame);
     frame[7] ^= 1; // Packet markers are deliberately outside ECC.
     if (protocolDecode(frame, sizeof(frame), message, &length, &corrections)) failures++;
+    tests++;
+    if (strcmp(protocolDecodeFailure(), "data_marker") != 0 || protocolDecodeFailureOffset() != 7) failures++;
+    protocolEncode(payload, 1, frame);
+    tests++;
+    if (!protocolDecode(frame, sizeof(frame), message, &length, &corrections) ||
+        strcmp(protocolDecodeFailure(), "none") != 0 || protocolDecodeFailureOffset() != 0) failures++;
+    // An ECC-valid header with invalid markers must be classified separately.
+    const uint8_t invalidHeader[3] = {0, 0, 0};
+    rsEncode(invalidHeader, 3, frame);
+    tests++;
+    if (protocolDecode(frame, sizeof(frame), message, &length, &corrections) ||
+        strcmp(protocolDecodeFailure(), "header_marker_or_length") != 0) failures++;
 }
 
 int main(void) {
